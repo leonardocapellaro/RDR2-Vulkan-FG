@@ -36,6 +36,7 @@ struct Config {
   bool nativeHudProtection=true; // final-color snapshot before HUD; Native DLSS-G only
   bool antiTearing = false;
   bool antiGhostHistory = true;
+  bool capturePresentTransfers = false; // opt-in: full-extent copy/blit into virtual swapchain images counts as the HUD-less snapshot (third-party Vulkan SR delivery, e.g. OptiScaler). INI: CapturePresentTransfers
   float depthSeparation = 10.f;  // sl::Constants minRelativeLinearDepthObjectSeparation; lower = stricter object separation at depth edges (anti-halo). 40 = Streamline default. INI: DepthSeparation
   bool     presentPacing = false; // optional extra GPU wait; off avoids duplicate serialization
   uint32_t fpsCap = 0;           // present-thread frame rate limit, 0 = unlimited

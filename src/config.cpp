@@ -159,6 +159,7 @@ void LoadConfig(){
   c.tagHudless  = GetPrivateProfileIntA("fgvk","TagHUDLess",c.tagHudless?1:0,path)!=0;
   c.nativeHudProtection=GetPrivateProfileIntA("fgvk","NativeHUDProtection",1,path)!=0;
   c.tagUI       = GetPrivateProfileIntA("fgvk","TagUI",c.tagUI?1:0,path)!=0;
+  c.capturePresentTransfers=GetPrivateProfileIntA("fgvk","CapturePresentTransfers",c.capturePresentTransfers?1:0,path)!=0;
   c.antiTearing=ReadStabilityOption("AntiTearing",false);
   c.antiGhostHistory=ReadStabilityOption("AntiGhostHistory",true);
   { char v[32]{};GetPrivateProfileStringA("fgvk","DepthSeparation","",v,sizeof(v),path);if(v[0]){float f=(float)atof(v);if(f>=1.f&&f<=200.f)c.depthSeparation=f;} }
@@ -182,8 +183,8 @@ void LoadConfig(){
   g_rt.presentPacing=c.presentPacing; g_rt.fpsCap=c.fpsCap; g_rt.menuKey=c.menuKey;g_rt.depthSeparation=c.depthSeparation;
   g_rt.frames = c.dlssgFrames; g_rt.fgUserOff = GetPrivateProfileIntA("fgvk","UserFGOff",0,path)!=0;
   UpdateMenuRuntime(g_rt.fgUserOff,g_rt.frames);
-  Log("config %s: DLSSGFrames=%u (x%u) ReflexMode=%d ReflexSleep=%d TagHUDLess=%d TagUI=%d PresentPacing=%d FPSCap=%u MvecScaleNormalized=%d OnAfterEvalFrames=%u OffAfterIdleFrames=%u keys: toggleFG=0x%x cycle=0x%x",
+  Log("config %s: DLSSGFrames=%u (x%u) ReflexMode=%d ReflexSleep=%d TagHUDLess=%d TagUI=%d PresentPacing=%d FPSCap=%u MvecScaleNormalized=%d OnAfterEvalFrames=%u OffAfterIdleFrames=%u keys: toggleFG=0x%x cycle=0x%x CapturePresentTransfers=%d",
       path, c.dlssgFrames, c.dlssgFrames+1, c.reflexMode, (int)c.reflexSleep, (int)c.tagHudless, (int)c.tagUI, (int)c.presentPacing, c.fpsCap, (int)c.mvecScaleNormalized, c.onAfterEvalFrames, c.offAfterIdleFrames,
-      c.keyToggleFG, c.keyCycleFrames);
+      c.keyToggleFG, c.keyCycleFrames, (int)c.capturePresentTransfers);
 }
 }

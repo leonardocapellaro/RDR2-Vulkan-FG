@@ -41,6 +41,7 @@ bool initializedLayout{};
 bool capturedThisFrame{};
 bool capturedAvailable{};
 bool loggedCapture{};
+bool loggedTransferCapture{};
 bool loggedFailure{};
 uint64_t activeFrame{};
 VkRenderPass capturedPass{};
@@ -56,6 +57,8 @@ PFN_vkCmdBeginRenderPass realBeginRenderPass{};
 PFN_vkCreateRenderPass2 realCreateRenderPass2{},realCreateRenderPass2KHR{};
 PFN_vkCmdBeginRenderPass2 realBeginRenderPass2{},realBeginRenderPass2KHR{};
 PFN_vkCmdBeginRendering realBeginRendering{},realBeginRenderingKHR{};
+PFN_vkCmdCopyImage realCopyImage{};
+PFN_vkCmdBlitImage realBlitImage{};
 
 template<class T> T DeviceFn(const char* name) { return gdpa && device ? reinterpret_cast<T>(gdpa(device, name)) : nullptr; }
 
@@ -225,6 +228,54 @@ void CaptureRendering(VkCommandBuffer c,const VkRenderingInfo* info){
 VKAPI_ATTR void VKAPI_CALL WrapRendering(VkCommandBuffer c,const VkRenderingInfo* i){CaptureRendering(c,i);realBeginRendering(c,i);}
 VKAPI_ATTR void VKAPI_CALL WrapRenderingKHR(VkCommandBuffer c,const VkRenderingInfo* i){CaptureRendering(c,i);realBeginRenderingKHR(c,i);}
 
+// Opt-in fallback for third-party SR delivery (OptiScaler Vulkan path): the game's
+// final content can reach the virtual swapchain images through a full-extent
+// vkCmdCopyImage/vkCmdBlitImage instead of a render pass whose color attachment is
+// a swapchain image. With CapturePresentTransfers=1 the bridge records that
+// transfer's destination as the same-frame snapshot. Opt-in on purpose: whatever
+// the game presents is captured exactly as presented, so content that still
+// carries HUD is captured with HUD (the render-pass path keeps its HUD-less
+// semantics). Layout is taken from the transfer itself: a copy/blit destination
+// must be TRANSFER_DST_OPTIMAL while the transfer records, and the recorded
+// capture restores that layout afterwards, leaving game barriers consistent.
+struct TransferRegion {VkOffset3D offset{};VkExtent3D extent{};VkImageSubresourceLayers sub{};};
+void HudCaptureAfterTransfer(VkCommandBuffer cmd,VkImage dst,VkImageLayout dstLayout,uint32_t regionCount,const TransferRegion* regions) {
+  XessCaptureScope ownership;
+  std::lock_guard<std::mutex> lock(captureMutex);
+  if(!captureImage||!activeFrame||capturedThisFrame||!Cfg().capturePresentTransfers)return;
+  if(dstLayout==VK_IMAGE_LAYOUT_UNDEFINED)dstLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  bool hit=false;
+  {
+    std::lock_guard<std::mutex> metadata(metadataMutex);
+    if(swapchainImages.count(dst))for(uint32_t i=0;i<regionCount;++i){const auto& r=regions[i];
+      if(r.extent.width==captureExtent.width&&r.extent.height==captureExtent.height&&r.extent.depth==1&&
+         !r.offset.x&&!r.offset.y&&!r.offset.z&&r.sub.aspectMask==VK_IMAGE_ASPECT_COLOR_BIT&&
+         !r.sub.mipLevel&&r.sub.layerCount==1&&!r.sub.baseArrayLayer){hit=true;break;}}
+  }
+  if(!hit)return;
+  RecordCapture(cmd,dst,dstLayout);
+  if(!loggedTransferCapture){loggedTransferCapture=true;Log("HUD capture first success via present transfer: frame=%llu dstImage=%p",(unsigned long long)activeFrame,(void*)dst);}
+}
+template<class T> void GatherRegions(uint32_t n,const T* src,TransferRegion* dst);
+template<> void GatherRegions<VkImageCopy>(uint32_t n,const VkImageCopy* src,TransferRegion* dst){for(uint32_t i=0;i<n;++i){dst[i].offset=src[i].dstOffset;dst[i].extent=src[i].extent;dst[i].sub=src[i].dstSubresource;}}
+template<> void GatherRegions<VkImageBlit>(uint32_t n,const VkImageBlit* src,TransferRegion* dst){for(uint32_t i=0;i<n;++i){dst[i].offset=src[i].dstOffsets[0];
+  dst[i].extent={uint32_t(src[i].dstOffsets[1].x-src[i].dstOffsets[0].x),uint32_t(src[i].dstOffsets[1].y-src[i].dstOffsets[0].y),uint32_t(src[i].dstOffsets[1].z-src[i].dstOffsets[0].z)};dst[i].sub=src[i].dstSubresource;}}
+template<class T> void TransferWrap(VkCommandBuffer c,VkImage dst,VkImageLayout dl,uint32_t n,const T* regions){
+  if(!Cfg().capturePresentTransfers||!regions||!n)return;
+  TransferRegion small[8];TransferRegion* regs=small;std::vector<TransferRegion> heap;
+  if(n>8){heap.resize(n);regs=heap.data();}
+  GatherRegions(n,regions,regs);
+  HudCaptureAfterTransfer(c,dst,dl,n,regs);
+}
+VKAPI_ATTR void VKAPI_CALL WrapCopyImage(VkCommandBuffer c,VkImage src,VkImageLayout sl,VkImage dst,VkImageLayout dl,uint32_t n,const VkImageCopy* r){
+  auto fn=realCopyImage;if(fn)fn(c,src,sl,dst,dl,n,r);
+  TransferWrap(c,dst,dl,n,r);
+}
+VKAPI_ATTR void VKAPI_CALL WrapBlitImage(VkCommandBuffer c,VkImage src,VkImageLayout sl,VkImage dst,VkImageLayout dl,uint32_t n,const VkImageBlit* r,VkFilter f){
+  auto fn=realBlitImage;if(fn)fn(c,src,sl,dst,dl,n,r,f);
+  TransferWrap(c,dst,dl,n,r);
+}
+
 template<class T> void AttachExport(HMODULE vk,const char* name,T& target,void* detour) {
   target=reinterpret_cast<T>(GetProcAddress(vk,name)); if(target) DetourAttach(reinterpret_cast<PVOID*>(&target),detour);
 }
@@ -239,6 +290,8 @@ void HudCaptureInstallExportHooks(HMODULE vk) {
   AttachExport(vk,"vkCreateRenderPass",realCreateRenderPass,(void*)WrapCreateRenderPass);
   AttachExport(vk,"vkDestroyRenderPass",realDestroyRenderPass,(void*)WrapDestroyRenderPass);
   AttachExport(vk,"vkCmdBeginRenderPass",realBeginRenderPass,(void*)WrapBeginRenderPass);
+  AttachExport(vk,"vkCmdCopyImage",realCopyImage,(void*)WrapCopyImage);
+  AttachExport(vk,"vkCmdBlitImage",realBlitImage,(void*)WrapBlitImage);
 }
 
 void HudCaptureInit(VkDevice d,VkPhysicalDevice pd,PFN_vkGetDeviceProcAddr getProc,VkFormat format,VkExtent2D extent,const std::vector<VkImage>& images) {
@@ -283,6 +336,8 @@ PFN_vkVoidFunction HudCaptureWrap(const char* name,PFN_vkVoidFunction fn) {
   if (!strcmp(name,"vkCreateRenderPass")) {realCreateRenderPass=(PFN_vkCreateRenderPass)fn;return (PFN_vkVoidFunction)WrapCreateRenderPass;}
   if (!strcmp(name,"vkDestroyRenderPass")) {realDestroyRenderPass=(PFN_vkDestroyRenderPass)fn;return (PFN_vkVoidFunction)WrapDestroyRenderPass;}
   if (!strcmp(name,"vkCmdBeginRenderPass")) {realBeginRenderPass=(PFN_vkCmdBeginRenderPass)fn;return (PFN_vkVoidFunction)WrapBeginRenderPass;}
+  if (!strcmp(name,"vkCmdCopyImage")) {realCopyImage=(PFN_vkCmdCopyImage)fn;return (PFN_vkVoidFunction)WrapCopyImage;}
+  if (!strcmp(name,"vkCmdBlitImage")) {realBlitImage=(PFN_vkCmdBlitImage)fn;return (PFN_vkVoidFunction)WrapBlitImage;}
   if(IsDX12Bridge(Cfg().provider)){
    if(!strcmp(name,"vkCreateRenderPass2")){realCreateRenderPass2=(PFN_vkCreateRenderPass2)fn;return (PFN_vkVoidFunction)WrapCreatePass2;}
    if(!strcmp(name,"vkCreateRenderPass2KHR")){realCreateRenderPass2KHR=(PFN_vkCreateRenderPass2)fn;return (PFN_vkVoidFunction)WrapCreatePass2KHR;}
