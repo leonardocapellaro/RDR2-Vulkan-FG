@@ -27,6 +27,7 @@
 #include "log.h"
 #include "runtime_errors.h"
 #include "hud_capture.h"
+#include "ui_synth.h"
 #include <vulkan/vulkan_win32.h>
 #include <dxgi1_5.h>
 #include <mutex>
@@ -66,14 +67,17 @@ ID3D12CommandQueue* dxQueue{};ID3D12CommandQueue* nativeDxQueue{};ID3D12Fence* d
 std::unordered_map<VkSurfaceKHR,HWND> windows;
 PFN_vkCreateWin32SurfaceKHR createSurface{};
 struct Frame {
- VkImage image{};VkDeviceMemory memory{};SharedImage transport{};
+ VkImage image{};VkDeviceMemory memory{};SharedImage transport{};SharedImage ui{};
  VkCommandBuffer command{};VkFence fence{};SharedFence uploaded{};
  ID3D12CommandAllocator* allocator{};ID3D12GraphicsCommandList* list{};
- uint64_t retired{},epoch{};bool acquired{},transportUsed{},submitMarked{};
+ uint64_t retired{},epoch{};bool acquired{},transportUsed{},uiUsed{},submitMarked{};
 };
 struct Chain {
  VkSwapchainKHR handle{};VkSurfaceKHR surface{};HWND window{};VkExtent2D extent{};VkFormat format{};DXGI_FORMAT dxFormat{};
  IDXGISwapChain3* dx{};VkCommandPool pool{};std::vector<Frame> frames;uint32_t next{};bool allowTearing{};
+ // Synthetic premultiplied UI layer (XeSSSynthUI): uiMode is the effective creation mode and
+ // uiSynth gates per-frame UI tagging for modes 3/5, which require a tagged UI resource.
+ bool uiSynth{};uint32_t uiMode{4};
 };
 std::unique_ptr<Chain> chain;
 std::unordered_set<VkSwapchainKHR> retiredChains;
@@ -181,7 +185,9 @@ VKAPI_ATTR VkResult VKAPI_CALL CopyableImage(VkDevice d,const VkImageCreateInfo*
 }
 bool MakeFrame(Chain& c,Frame& f,VkImageUsageFlags usage){
  if(!NativeImage(c.extent,c.format,usage|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,f.image,f.memory) ||
-    !bridge.CreateImage(c.extent.width,c.extent.height,c.dxFormat,c.format,f.transport) || !bridge.CreateFence(f.uploaded))return false;
+    !bridge.CreateImage(c.extent.width,c.extent.height,c.dxFormat,c.format,f.transport) ||
+    (c.uiSynth&&!bridge.CreateImage(c.extent.width,c.extent.height,c.dxFormat,c.format,f.ui)) ||
+    !bridge.CreateFence(f.uploaded))return false;
  VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ai.commandPool=c.pool;ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ai.commandBufferCount=1;
  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fi.flags=VK_FENCE_CREATE_SIGNALED_BIT;
  if(!Vk(Fn<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(device,&ai,&f.command),"Bridge command allocation") ||
@@ -203,7 +209,7 @@ void DestroyInputs(){
  for(auto& in:inputs)DestroyInput(in);
 }
 void DestroyFrameCopies(Chain& c){
- for(auto& f:c.frames){if(f.list)f.list->Release();if(f.allocator)f.allocator->Release();bridge.DestroyImage(f.transport);bridge.DestroyFence(f.uploaded);
+ for(auto& f:c.frames){if(f.list)f.list->Release();if(f.allocator)f.allocator->Release();bridge.DestroyImage(f.transport);bridge.DestroyImage(f.ui);f.uiUsed=false;bridge.DestroyFence(f.uploaded);
   if(f.fence)Fn<PFN_vkDestroyFence>("vkDestroyFence")(device,f.fence,nullptr);
   f.list=nullptr;f.allocator=nullptr;f.fence=VK_NULL_HANDLE;f.command=VK_NULL_HANDLE;
  }
@@ -241,6 +247,7 @@ bool DestroyChain(bool retainGameResources=false){
   group.chain=std::move(chain);
   Log("Bridge old resources retained until game destroys swapchain=%p; generations=%zu",(void*)handle,retiredResources.size());
  }else{HudCaptureDestroy();DestroyFrameResources(c);}
+ SynthUiDestroy();
  DestroyInputs();
  attached=false;sdkAvailable=false;sdkFailed=false;chain.reset();return true;
 }
@@ -534,13 +541,25 @@ VkResult XessCreateSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const
  // texture, which RDR2 under Vulkan never exposes (the HUD is composited into the
  // backbuffer). Selecting one without that resource makes the SDK refuse with
  // MISMATCH_INPUT_RESOURCES and generate no frames; clamp to mode 4 and say so.
+ // Synthetic UI (XeSSSynthUI): premultiplied layer computed from the presented frame minus the
+ // HUD-less capture, tagged as RES_UI so Intel UI modes 3/5 become satisfiable. 8-bit UNORM only.
+ SynthUiInit(device,physical,XessMenuGDPA,c.format,c.extent);
+ const bool synthReady=Cfg().xessSynthUI && SynthUiAvailable();
  uint32_t uiModeCfg=Cfg().xessUiMode;
- if(uiModeCfg==2||uiModeCfg==3||uiModeCfg==5){Log("XeSSUiMode=%u needs a UI texture RDR2 cannot provide; clamping to 4 (BACKBUFFER_HUDLESS)",uiModeCfg);uiModeCfg=4;}
+ if(uiModeCfg==2){Log("XeSSUiMode=2 needs a game-provided UI texture; clamping to 4 (BACKBUFFER_HUDLESS)",uiModeCfg);uiModeCfg=4;}
+ if((uiModeCfg==3||uiModeCfg==5)&&!synthReady){
+  Log("XeSSUiMode=%u needs a UI texture; %s — clamping to 4 (BACKBUFFER_HUDLESS). Set XeSSSynthUI=1 to synthesize one.",
+      uiModeCfg,Cfg().xessSynthUI?"the synthetic UI pipeline is unavailable":"XeSSSynthUI=0");
+  uiModeCfg=4;
+ }
+ c.uiMode=uiModeCfg;
+ if(synthReady&&(uiModeCfg==3||uiModeCfg==5))Log("XeSS synthetic UI armed: tagging premultiplied UI layer for UI mode %u",uiModeCfg);
  if(sdkAvailable){
   const auto uiMode=(xefg_swapchain_ui_mode_t)uiModeCfg; // default 4 = BACKBUFFER_HUDLESS (author's choice)
   attached=sdk.CreatePresentation(c.window,dxQueue,factory,desc,XEFG_SWAPCHAIN_INIT_FLAG_INVERTED_DEPTH,1,uiMode,&target.fullscreen,target.output);
   if(attached){sdkFailed=false;c.dx=sdk.Swapchain();c.dx->AddRef();dxQueue=sdk.Queue(nativeDxQueue);RuntimeErrors::ClearError(RuntimeErrors::Code::ProviderInit);RuntimeErrors::ClearError(RuntimeErrors::Code::HardwareScheduling);}else{SdkError();sdk.Shutdown();sdkAvailable=false;}
  }
+ c.uiSynth=attached&&synthReady&&(c.uiMode==3||c.uiMode==5);
  if(!c.dx){
   HRESULT result=factory->CreateSwapChainForHwnd(dxQueue,c.window,&desc,&target.fullscreen,target.output,&dx);
   if(SUCCEEDED(result)){result=dx->QueryInterface(__uuidof(IDXGISwapChain3),(void**)&c.dx);dx->Release();}
@@ -711,7 +730,15 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
  if(!Vk(Fn<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(f.command,&begin),"XeSS upload command begin"))return VK_ERROR_DEVICE_LOST;
  auto barrier=Fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");auto copy=Fn<PFN_vkCmdCopyImage>("vkCmdCopyImage");
  if(generate){auto hud=HudCaptureResource();SnapshotInput color{(VkImage)hud.resource,c.format,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_USAGE_TRANSFER_SRC_BIT,c.extent,{0,0}};
-  if(!in->snapshot->RecordColor(f.command,color,family,!in->colorUsed))generate=false;}
+  if(!in->snapshot->RecordColor(f.command,color,family,!in->colorUsed))generate=false;
+  // Best-effort: once created in a UI mode the SDK demands a tagged UI resource every frame, so a
+  // failed record still tags the retained (stale, self-healing) layer rather than erroring the contract.
+  if(generate&&c.uiSynth){
+   static bool synthWarned=false;
+   const bool recorded=hud.resource&&SynthUiRecord(f.command,f.image,(VkImage)hud.resource,f.ui.vk,family,!f.uiUsed);
+   if(recorded)f.uiUsed=true;
+   else if(!synthWarned){synthWarned=true;Log("Synthetic UI record failed; tagging retained layer for this frame");}
+  }}
  VkImageMemoryBarrier bs[2]{};for(auto& b:bs){b.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};}
  bs[0].image=f.image;bs[0].oldLayout=VK_IMAGE_LAYOUT_GENERAL;bs[0].newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
  bs[0].srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;bs[0].dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
@@ -757,11 +784,14 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
   }
   in->constants.resetHistory=in->slConstants.reset==sl::Boolean::eTrue;
   if(resumeHistory.NeedsReset(f.epoch) || presentedDimensions.Changed(in->dw,in->dh)){in->constants.resetHistory=1;in->slConstants.reset=sl::Boolean::eTrue;}
-  SharedImage* resources[]={&in->snapshot->hudless,&in->snapshot->depth,&in->snapshot->motion};xefg_swapchain_d3d12_resource_data_t tags[3]{};
-  for(uint32_t i=0;i<3;++i){transition(resources[i]->dx,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);tags[i].pResource=resources[i]->dx;tags[i].validity=XEFG_SWAPCHAIN_RV_ONLY_NOW;tags[i].incomingState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;tags[i].resourceSize=i?xefg_swapchain_2d_t{in->dw,in->dh}:xefg_swapchain_2d_t{c.extent.width,c.extent.height};}
+  SharedImage* resources[]={&in->snapshot->hudless,&in->snapshot->depth,&in->snapshot->motion,&f.ui};
+  const uint32_t tagCount=c.uiSynth?4u:3u;
+  xefg_swapchain_d3d12_resource_data_t tags[4]{};
+  for(uint32_t i=0;i<tagCount;++i){transition(resources[i]->dx,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);tags[i].pResource=resources[i]->dx;tags[i].validity=XEFG_SWAPCHAIN_RV_ONLY_NOW;tags[i].incomingState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;tags[i].resourceSize=(i==0||i==3)?xefg_swapchain_2d_t{c.extent.width,c.extent.height}:xefg_swapchain_2d_t{in->dw,in->dh};}
   tags[0].type=XEFG_SWAPCHAIN_RES_HUDLESS_COLOR;tags[1].type=XEFG_SWAPCHAIN_RES_DEPTH;tags[2].type=XEFG_SWAPCHAIN_RES_MOTION_VECTOR;
-  double tagStart=ClockMs();if(!sdk.TagFrame(id,in->constants,tags,3,f.list,in->slConstants)){SdkError(false);generate=false;}timings.tagCPU.Add(ClockMs()-tagStart);
-  for(auto* resource:resources)transition(resource->dx,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+  if(c.uiSynth)tags[3].type=XEFG_SWAPCHAIN_RES_UI;
+  double tagStart=ClockMs();if(!sdk.TagFrame(id,in->constants,tags,tagCount,f.list,in->slConstants)){SdkError(false);generate=false;}timings.tagCPU.Add(ClockMs()-tagStart);
+  for(uint32_t i=0;i<tagCount;++i)transition(resources[i]->dx,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
  }
  if(attached && !sdk.SetEnabled(generate)){SdkError(false);generate=false;sdk.SetEnabled(false);}
  if(!Dx(f.list->Close(),"XeSS DX12 copy list close"))return VK_ERROR_DEVICE_LOST;

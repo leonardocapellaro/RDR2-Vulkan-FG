@@ -39,6 +39,7 @@ struct Config {
   bool capturePresentTransfers = false; // opt-in: full-extent copy/blit into virtual swapchain images counts as the HUD-less snapshot (third-party Vulkan SR delivery, e.g. OptiScaler). INI: CapturePresentTransfers
   uint32_t xessUiMode = 4;  // XeSS-FG swapchain UI mode: 1=NONE 2=BACKBUFFER_UITEXTURE 3=HUDLESS_UITEXTURE 4=BACKBUFFER_HUDLESS (author default; UI extracted from backbuffer) 5=BACKBUFFER_HUDLESS_UITEXTURE. Modes 2/3/5 need a UI texture RDR2/Vulkan does not expose and are clamped to 4 with a log. INI: XeSSUiMode
   int xessUiComposition = -1; // -1 = author default (enabled unless mode NONE), 0 = force off, 1 = force on. INI: XeSSUiComposition
+  bool     xessSynthUI = false; // synthesize a premultiplied UI layer (B minus (1-a)C) and tag it so UI modes 3/5 become available. INI: XeSSSynthUI
   float depthSeparation = 10.f;  // sl::Constants minRelativeLinearDepthObjectSeparation; lower = stricter object separation at depth edges (anti-halo). 40 = Streamline default. INI: DepthSeparation
   bool     presentPacing = false; // optional extra GPU wait; off avoids duplicate serialization
   uint32_t fpsCap = 0;           // present-thread frame rate limit, 0 = unlimited
