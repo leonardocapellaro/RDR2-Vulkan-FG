@@ -1,4 +1,5 @@
 #include "xess_bridge_runtime.h"
+#include "config.h"
 #include "experiment_policy.h"
 #include "log.h"
 #include "xess_output_pacing.h"
@@ -93,8 +94,10 @@ bool Runtime::CreatePresentation(HWND window,ID3D12CommandQueue* queue,IDXGIFact
   initializedMax_=count; // A later failure requires Shutdown, not a second init.
   if(!FG("xefgSwapChainD3D12GetSwapChainPtr",p_xefgSwapChainD3D12GetSwapChainPtr(
       fg_,__uuidof(IDXGISwapChain3),(void**)&swapchain_)))return false;
-  if(!FG("xefgSwapChainSetUiCompositionState",p_xefgSwapChainSetUiCompositionState(fg_,
-      uiMode==XEFG_SWAPCHAIN_UI_MODE_NONE?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED)))return false;
+  const int forcedComposition=Cfg().xessUiComposition; // -1 = auto (enabled unless mode NONE); INI XeSSUiComposition forces 0/1
+  const auto composition=forcedComposition>=0?(forcedComposition?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED)
+      :(uiMode==XEFG_SWAPCHAIN_UI_MODE_NONE?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED);
+  if(!FG("xefgSwapChainSetUiCompositionState",p_xefgSwapChainSetUiCompositionState(fg_,composition)))return false;
   xess_pacing::Bind(fg_,nativeDevice_);
   return SetEnabled(false); // Enable only after a complete first-frame contract.
 }
@@ -114,8 +117,10 @@ bool Runtime::AttachPresentation(IDXGISwapChain3* existing,ID3D12CommandQueue* q
   if(!FG("xefgSwapChainD3D12InitFromSwapChain",p_xefgSwapChainD3D12InitFromSwapChain(fg_,queue,&params)))return false;
   initializedMax_=count;
   if(!FG("xefgSwapChainD3D12GetSwapChainPtr",p_xefgSwapChainD3D12GetSwapChainPtr(fg_,__uuidof(IDXGISwapChain3),(void**)&swapchain_)))return false;
-  if(!FG("xefgSwapChainSetUiCompositionState",p_xefgSwapChainSetUiCompositionState(fg_,
-      uiMode==XEFG_SWAPCHAIN_UI_MODE_NONE?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED)))return false;
+  const int forcedComposition=Cfg().xessUiComposition; // -1 = auto (enabled unless mode NONE); INI XeSSUiComposition forces 0/1
+  const auto composition=forcedComposition>=0?(forcedComposition?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED)
+      :(uiMode==XEFG_SWAPCHAIN_UI_MODE_NONE?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED);
+  if(!FG("xefgSwapChainSetUiCompositionState",p_xefgSwapChainSetUiCompositionState(fg_,composition)))return false;
   xess_pacing::Bind(fg_,nativeDevice_);return SetEnabled(false);
 }
 bool Runtime::SetInterpolations(uint32_t count){

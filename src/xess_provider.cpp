@@ -530,8 +530,15 @@ VkResult XessCreateSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const
  DisplayTarget target;target.Resolve(c.window,bridge.Native(),factory);
  // RDR2's tracked SR inputs use inverted depth. Every captured input verifies it;
  // mismatches are reported and presented without interpolation, never guessed.
+ // Intel's XeSS-FG guide: UI modes 2/3/5 require a separately tagged UI color+alpha
+ // texture, which RDR2 under Vulkan never exposes (the HUD is composited into the
+ // backbuffer). Selecting one without that resource makes the SDK refuse with
+ // MISMATCH_INPUT_RESOURCES and generate no frames; clamp to mode 4 and say so.
+ uint32_t uiModeCfg=Cfg().xessUiMode;
+ if(uiModeCfg==2||uiModeCfg==3||uiModeCfg==5){Log("XeSSUiMode=%u needs a UI texture RDR2 cannot provide; clamping to 4 (BACKBUFFER_HUDLESS)",uiModeCfg);uiModeCfg=4;}
  if(sdkAvailable){
-  attached=sdk.CreatePresentation(c.window,dxQueue,factory,desc,XEFG_SWAPCHAIN_INIT_FLAG_INVERTED_DEPTH,1,XEFG_SWAPCHAIN_UI_MODE_BACKBUFFER_HUDLESS,&target.fullscreen,target.output);
+  const auto uiMode=(xefg_swapchain_ui_mode_t)uiModeCfg; // default 4 = BACKBUFFER_HUDLESS (author's choice)
+  attached=sdk.CreatePresentation(c.window,dxQueue,factory,desc,XEFG_SWAPCHAIN_INIT_FLAG_INVERTED_DEPTH,1,uiMode,&target.fullscreen,target.output);
   if(attached){sdkFailed=false;c.dx=sdk.Swapchain();c.dx->AddRef();dxQueue=sdk.Queue(nativeDxQueue);RuntimeErrors::ClearError(RuntimeErrors::Code::ProviderInit);RuntimeErrors::ClearError(RuntimeErrors::Code::HardwareScheduling);}else{SdkError();sdk.Shutdown();sdkAvailable=false;}
  }
  if(!c.dx){
@@ -556,7 +563,7 @@ VkResult XessCreateSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const
  std::vector<VkImage> images;for(auto& f:c.frames)images.push_back(f.image);
  HudCaptureInit(device,physical,XessMenuGDPA,c.format,c.extent,images);
  MenuCaptureImages(device,c.handle,(uint32_t)images.size(),images.data());
- Log("XeSS experimental virtual swapchain: %ux%u images=%zu SDK=%d maxInterpolations=%u allowTearing=%d syncInterval=%u",c.extent.width,c.extent.height,c.frames.size(),(int)attached,sdkAvailable?sdk.MaxInterpolations():0,(int)c.allowTearing,Cfg().antiTearing?1u:0u);
+ Log("XeSS experimental virtual swapchain: %ux%u images=%zu SDK=%d maxInterpolations=%u allowTearing=%d syncInterval=%u uiMode=%u uiComposition=%d",c.extent.width,c.extent.height,c.frames.size(),(int)attached,sdkAvailable?sdk.MaxInterpolations():0,(int)c.allowTearing,Cfg().antiTearing?1u:0u,(unsigned)uiModeCfg,(int)Cfg().xessUiComposition);
  return VK_SUCCESS;
 }
 bool XessPrepare(VkCommandBuffer cmd,VkImage depthImage,VkImage motionImage,uint32_t dw,uint32_t dh,uint32_t mw,uint32_t mh,

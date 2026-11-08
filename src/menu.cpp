@@ -510,7 +510,7 @@ void MenuBuildUI(){
     ImGui::PopFont();ImGui::PushFont(captionFont);
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button,{.13f,.34f,.55f,1});ImGui::PushStyleColor(ImGuiCol_ButtonHovered,{.18f,.46f,.72f,1});
-    ImGui::SetCursorPosX(ImGui::GetWindowWidth()-ImGui::CalcTextSize("made by mor3a").x-16*menuScale);ImGui::TextDisabled("made by mor3a");
+    ImGui::SetCursorPosX(ImGui::GetWindowWidth()-ImGui::CalcTextSize("RDR2 Vulkan FG").x-16*menuScale);ImGui::TextDisabled("RDR2 Vulkan FG");
     ImGui::PopStyleColor(2);ImGui::PopFont();
     ImGui::End();if(!visible)Toggle(false);
   }
