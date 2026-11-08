@@ -4,9 +4,10 @@ Fork of [RDR2 Vulkan Frame Generation 0.82](https://github.com/mor3a/rdr2-vulkan
 
 This branch (`hudfield`) is the field build used to bring **Intel XeSS 2x frame generation to RDR2 on native Vulkan with an Intel Arc B390**, running alongside [OptiScaler](https://github.com/optiscaler/OptiScaler). Validated on real hardware: ~36 rendered → ~72 displayed fps at 3440x1440.
 
-## What this fork changes (tag `0.82+hudfield-v3`)
+## What this fork changes (tag `0.82+hudfield-v4`)
 
-- **`XeSSUiMode` (INI, 1–5)** selects the XeSS-FG UI composition mode; **`XeSSUiComposition` (-1/0/1)** forces the composition state. Used to A/B the translucent wheel-menu flicker against Intel's documented backbuffer-extraction weakness. Modes 2/3/5 need a UI texture RDR2/Vulkan never exposes, so they are clamped to 4 with a log line instead of letting the SDK refuse the swapchain and generate nothing.
+- **`XeSSUiMode` (INI, 1–5)** selects the XeSS-FG UI composition mode; **`XeSSUiComposition` (-1/0/1)** forces the composition state. Used to A/B the translucent wheel-menu flicker against Intel's documented backbuffer-extraction weakness.
+- **`XeSSSynthUI` (INI, 0/1, default 0)** synthesizes the premultiplied UI color+alpha layer the SDK demands for UI modes 3/5: a compute shader solves `UI = B − (1−a)·C` from the presented frame (B) and the HUD-less capture (C) of the same epoch (compositional identity reproduces B for any alpha estimate; mode 5's backbuffer extraction refines edges temporally). Without it, modes 2/3/5 are clamped to 4 with a log line instead of letting the SDK refuse the swapchain and generate nothing.
 - **Menu/hotkey diagnostics**: `menu: open/close`, first observed game-queue clicks, and hotkeys rejected by wrong focus — added because a field session produced zero menu input events.
 - **No network calls**: the upstream Nexus update checker's mod id is set to `0` in this fork, so nothing queries or links a third-party page.
 - **Opt-in present-transfer HUD capture** (`CapturePresentTransfers=1`) for third-party Vulkan SR overlays (kept off by default; never needed in the validated session).
@@ -14,7 +15,7 @@ This branch (`hudfield`) is the field build used to bring **Intel XeSS 2x frame 
 
 ## Releases
 
-The `hudfield` branch carries reproducible Windows x64 builds. The current package (`RDR2VulkanFG-hudfield-v3-B390.zip`) contains the `.asi`, the diagnostics DLL, checksums and a field-test guide (UI-mode A/B grid). It includes **no** NVIDIA/Intel/Rockstar binaries — the game runtime files are not redistributed here.
+The `hudfield` branch carries reproducible Windows x64 builds. The current package (`RDR2VulkanFG-hudfield-v4-B390.zip`) contains the `.asi`, the diagnostics DLL, checksums and a field-test guide (UI-mode A/B grid). It includes **no** NVIDIA/Intel/Rockstar binaries — the game runtime files are not redistributed here.
 
 ## Building
 
