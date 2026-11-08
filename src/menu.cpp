@@ -88,6 +88,8 @@ static BOOL WINAPI CursorClip(const RECT* rect){
 }
 static void Toggle(bool value){
   if(open.exchange(value)==value)return;
+  // Diagnóstico de campo: sem esta linha nao sabemos se a tecla do menu chegou.
+  Log("menu: %s",value?"open":"close");
   if(value)StartUpdateCheck(true);
   std::lock_guard<std::mutex> lock(inputMutex);
   if(value){GetCursorPos(&savedCursor);GetClipCursor(&desiredClip);hasClip=true;originalClipCursor(nullptr);}
@@ -109,6 +111,11 @@ static const char* KeyName(int vk){
   return buffer;
 }
 static LRESULT ProcessGameMessage(HWND w,UINT m,WPARAM a,LPARAM b){
+  // Uma linha por evento-chave, limitada: prova que o hook de mensagens ve o
+  // mouse/teclado do jogo (a pista de que clique no menu pode nao estar vivo).
+  static int seenClick=0,seenMove=0;
+  if(m==WM_LBUTTONDOWN&&seenClick<3){++seenClick;Log("menu input: left click observed in game queue (menu open=%d tid=%lu)",(int)open,(unsigned long)GetCurrentThreadId());}
+  if(m==WM_MOUSEMOVE&&seenMove<1){++seenMove;Log("menu input: mouse movement observed in game queue");}
   if(captureMenuKey && m==WM_KEYDOWN){if((int)a!=VK_ESCAPE)SaveMenuKey((int)a);captureMenuKey=false;return 0;}
   if(m==WM_KEYDOWN && (int)a==Rt().menuKey.load() && rendererAvailable){if(!(b&(1LL<<30)))Toggle(!open);return 0;}
   if(m==WM_KEYUP && (int)a==Rt().menuKey.load())return 0;

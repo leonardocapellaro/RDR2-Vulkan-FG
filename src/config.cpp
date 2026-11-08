@@ -58,6 +58,7 @@ bool PollHotkeys(){
   }
   bool gameFocused=false;auto foreground=GetForegroundWindow();DWORD foregroundPid{};if(foreground)GetWindowThreadProcessId(foreground,&foregroundPid);gameFocused=foregroundPid==GetCurrentProcessId();
   bool toggle=Pressed(g_cfg.keyToggleFG,wT),cycle=Pressed(g_cfg.keyCycleFrames,wC);
+  if((toggle||cycle)&&!gameFocused)Log("hotkey: %s ignored — foreground window is not the game (vk=0x%x)",cycle?"cycle":"toggle",cycle?g_cfg.keyCycleFrames:g_cfg.keyToggleFG);
   if(gameFocused && toggle){ g_rt.fgUserOff = !g_rt.fgUserOff; Log("hotkey: FG %s by user", g_rt.fgUserOff?"OFF":"ON"); changed=true; }
   if(gameFocused && cycle && IsDX12Bridge(g_cfg.provider)){auto max=g_rt.maxFrames.load();g_rt.frames=g_rt.frames>=max?1:g_rt.frames+1;Log("hotkey: generated frames -> %u (x%u)",g_rt.frames,g_rt.frames+1);changed=true;}
   if(changed){char path[MAX_PATH]{},value[16]{};IniPath(path,sizeof(path));snprintf(value,sizeof(value),"%u",g_rt.frames);WritePrivateProfileStringA("fgvk","DLSSGFrames",value,path);WritePrivateProfileStringA("fgvk","UserFGOff",g_rt.fgUserOff?"1":"0",path);}
