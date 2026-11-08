@@ -1,35 +1,27 @@
-# RDR2 Vulkan Frame Generation
+# RDR2 Vulkan FG
 
-Version 0.82 source for Red Dead Redemption 2. DLSS-G uses Native Vulkan by default; XeSS FG uses a Vulkan/D3D12 bridge.
+Fork of [RDR2 Vulkan Frame Generation 0.82](https://github.com/mor3a/rdr2-vulkan-frame-generation) (MIT — original `LICENSE.txt` and copyright retained; see [ACKNOWLEDGEMENTS.txt](ACKNOWLEDGEMENTS.txt) and [README-0.82-original.md](README-0.82-original.md) for the upstream project, its requirements and controls).
 
-[Downloads and installation package](https://www.nexusmods.com/reddeadredemption2/mods/10997)
+This branch (`hudfield`) is the field build used to bring **Intel XeSS 2x frame generation to RDR2 on native Vulkan with an Intel Arc B390**, running alongside [OptiScaler](https://github.com/optiscaler/OptiScaler). Validated on real hardware: ~36 rendered → ~72 displayed fps at 3440x1440.
 
-## Requirements
+## What this fork changes (tag `0.82+hudfield-v3`)
 
-Windows, Vulkan, in-game DLSS, a compatible NVIDIA RTX GPU, an ASI loader, and Hardware-accelerated GPU scheduling enabled. ScriptHookRDR2 is not required. FSR3 is currently disabled. AMD GPUs are not supported.
+- **`XeSSUiMode` (INI, 1–5)** selects the XeSS-FG UI composition mode; **`XeSSUiComposition` (-1/0/1)** forces the composition state. Used to A/B the translucent wheel-menu flicker against Intel's documented backbuffer-extraction weakness. Modes 2/3/5 need a UI texture RDR2/Vulkan never exposes, so they are clamped to 4 with a log line instead of letting the SDK refuse the swapchain and generate nothing.
+- **Menu/hotkey diagnostics**: `menu: open/close`, first observed game-queue clicks, and hotkeys rejected by wrong focus — added because a field session produced zero menu input events.
+- **No network calls**: the upstream Nexus update checker's mod id is set to `0` in this fork, so nothing queries or links a third-party page.
+- **Opt-in present-transfer HUD capture** (`CapturePresentTransfers=1`) for third-party Vulkan SR overlays (kept off by default; never needed in the validated session).
+- User-visible strings are branded **RDR2 Vulkan FG**. The MIT license file is unchanged.
 
-Extract the complete runtime package beside `RDR2.exe` with the game closed. Preserve your ASI loader and other mods. Remove an old `RDR2VulkanFGCamera.asi` if present. Source builds need the runtime files from the matching package.
+## Releases
 
-## Controls
+The `hudfield` branch carries reproducible Windows x64 builds. The current package (`RDR2VulkanFG-hudfield-v3-B390.zip`) contains the `.asi`, the diagnostics DLL, checksums and a field-test guide (UI-mode A/B grid). It includes **no** NVIDIA/Intel/Rockstar binaries — the game runtime files are not redistributed here.
 
-Insert opens the menu. Numpad `*` toggles frame generation. The menu key is configurable. Existing INI files retain their saved key.
+## Building
 
-DLSS-G uses Native Vulkan by default. `DLSSGBackend=Bridge` selects the D3D12 presentation bridge on the next game launch. XeSS FG remains on its bridge path. Multipliers depend on the provider and runtime-reported capacity; XeSS 3x/4x are experimental.
+Upstream [docs/BUILD.md](docs/BUILD.md) applies. In practice we cross-compile on Linux with `zig c++ -target x86_64-windows-gnu` (zig 0.17.1; same pinned dependencies as upstream `Build.ps1`). A reproducible driver script lives in [rdr2-ngxbridge/tools/build-mor3a-zig-linux.sh](https://github.com/leonardocapellaro/rdr2-ngxbridge/blob/master/tools/build-mor3a-zig-linux.sh). The ASI loads and unloads cleanly under Wine; RDR2 validation runs on the target Arc hardware.
 
-`Restart FG / Apply changes` rebuilds generation resources. Switching between Native and bridge presentation requires restarting the game. RTX20 preset changes also require a game restart.
+## Known limits
 
-RTX20 DLSS-G is experimental and opt-in: add `EnableExperimentalRTX20=1` under `[fgvk]` with the game closed. This selects the private 0.4.0 unlock and D3D12 bridge. Loading the unlock does not establish gameplay support on every RTX20 card.
-
-## Source and validation
-
-The current `src/`, `tests/` and `vendor/` files match the 0.82 build source. The Nexus update checker is included. Runtime DLLs and compiled packages are distributed separately; building the ASI does not assemble a runtime installation.
-
-[Build instructions](docs/BUILD.md) · [Architecture and current status](docs/MAINTAINER-NOTES.md) · [0.82 changes](CHANGELOG-0.82.txt)
-
-0.82 includes a Streamline queue-allocation correction for Native Vulkan startup. Allocation regressions and isolated device creation passed on the development RTX3050 Laptop. Validation on the reported RTX5070Ti driver and RTX20 gameplay is still required. The cutscene suspension report is under investigation.
-
-The FPS counter combines game-present and provider telemetry. An increased count alone does not prove uniform display cadence. Frame generation has GPU, memory and presentation overhead; performance varies by hardware, settings and provider.
-
-## License
-
-Original project code is MIT licensed. Third-party components retain their own terms; see `LICENSE.txt`, `ACKNOWLEDGEMENTS.txt`, `licenses/` and vendored notices.
+- Base is 0.82, not the 1.0 beta: the beta never reaches FG under OptiScaler (fails its HUD-less gate before the first interpolated frame).
+- Wheel menus can flicker in the default UI mode 4 (known SDK weakness for semi-transparent UI). The mode grid in the release guide is the measurement protocol; the proper fix (synthesized UI texture for mode 5) is future work.
+- Multiplier switching in the menu was never confirmed on hardware: no input events reached the mod in the last session; this fork's diagnostics exist to localize that.
