@@ -26,7 +26,7 @@ BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID reserved) {
     fgvk::SetDebugLogging(fgvk::Cfg().debugLogging);
     if(!fgvk::Cfg().enabled){ fgvk::Log("FG disabled; native rendering, no diagnostic hooks"); return TRUE; }
     if(!fgvk::Cfg().applicationId){ fgvk::Log("ApplicationId missing; refusing BG3 identity and leaving game untouched"); return TRUE; }
-    fgvk::Log("RDR2 Vulkan FG %s+hudfield-v4; provider=%s; installing early hooks",fgvk::kModVersion,fgvk::Cfg().provider==fgvk::FGProvider::DLSSGBridge?"DLSSG DX12 bridge":fgvk::Cfg().provider==fgvk::FGProvider::XeSS?"XeSS experimental":fgvk::Cfg().provider==fgvk::FGProvider::FSR3?"FSR3":"DLSSG");
+    fgvk::Log("RDR2 Vulkan FG %s+hudfield-v4.1; provider=%s; installing early hooks",fgvk::kModVersion,fgvk::Cfg().provider==fgvk::FGProvider::DLSSGBridge?"DLSSG DX12 bridge":fgvk::Cfg().provider==fgvk::FGProvider::XeSS?"XeSS experimental":fgvk::Cfg().provider==fgvk::FGProvider::FSR3?"FSR3":"DLSSG");
     // Simulation reaches the same graphics-start gate as a real AMD GPU.
     // DllMain must never wait on or display the modal warning.
     const bool inputsReady=!fgvk::Cfg().simulateUnsupportedAMD && fgvk::InstallEarlyNgxHooks();

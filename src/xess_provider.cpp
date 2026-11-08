@@ -543,12 +543,14 @@ VkResult XessCreateSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const
  // MISMATCH_INPUT_RESOURCES and generate no frames; clamp to mode 4 and say so.
  // Synthetic UI (XeSSSynthUI): premultiplied layer computed from the presented frame minus the
  // HUD-less capture, tagged as RES_UI so Intel UI modes 3/5 become satisfiable. 8-bit UNORM only.
- SynthUiInit(device,physical,XessMenuGDPA,c.format,c.extent);
+ // Allocate the synthetic UI pipeline only when it is actually requested: the staging ring is
+ // ~20MB per slot, and building it on the default XeSSSynthUI=0 path would burn VRAM and init time.
+ if(Cfg().xessSynthUI)SynthUiInit(device,physical,XessMenuGDPA,c.format,c.extent);
  const bool synthReady=Cfg().xessSynthUI && SynthUiAvailable();
  uint32_t uiModeCfg=Cfg().xessUiMode;
- if(uiModeCfg==2){Log("XeSSUiMode=2 needs a game-provided UI texture; clamping to 4 (BACKBUFFER_HUDLESS)",uiModeCfg);uiModeCfg=4;}
+ if(uiModeCfg==2){Log("XeSSUiMode=2 needs a game-provided UI texture; clamping to 4 (BACKBUFFER_HUDLESS)");uiModeCfg=4;}
  if((uiModeCfg==3||uiModeCfg==5)&&!synthReady){
-  Log("XeSSUiMode=%u needs a UI texture; %s — clamping to 4 (BACKBUFFER_HUDLESS). Set XeSSSynthUI=1 to synthesize one.",
+  Log("XeSSUiMode=%u needs a UI texture; %s - clamping to 4 (BACKBUFFER_HUDLESS). Set XeSSSynthUI=1 to synthesize one.",
       uiModeCfg,Cfg().xessSynthUI?"the synthetic UI pipeline is unavailable":"XeSSSynthUI=0");
   uiModeCfg=4;
  }
