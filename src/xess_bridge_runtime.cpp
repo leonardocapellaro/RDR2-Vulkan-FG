@@ -91,7 +91,7 @@ bool Runtime::CreatePresentation(HWND window,ID3D12CommandQueue* queue,IDXGIFact
   params.initFlags=flags;params.maxInterpolatedFrames=count;params.uiMode=uiMode;
   if(!FG("xefgSwapChainD3D12InitFromSwapChainDesc",p_xefgSwapChainD3D12InitFromSwapChainDesc(
       fg_,window,&desc,fullscreen,queue,factory,&params)))return false;
-  initializedMax_=count; // A later failure requires Shutdown, not a second init.
+  initializedMax_=count;currentInterp_=count; // A later failure requires Shutdown, not a second init.
   if(!FG("xefgSwapChainD3D12GetSwapChainPtr",p_xefgSwapChainD3D12GetSwapChainPtr(
       fg_,__uuidof(IDXGISwapChain3),(void**)&swapchain_)))return false;
   const int forcedComposition=Cfg().xessUiComposition; // -1 = auto (enabled unless mode NONE); INI XeSSUiComposition forces 0/1
@@ -115,7 +115,7 @@ bool Runtime::AttachPresentation(IDXGISwapChain3* existing,ID3D12CommandQueue* q
   xefg_swapchain_d3d12_init_params_t params{};params.pApplicationSwapChain=existing;
   params.initFlags=flags;params.maxInterpolatedFrames=count;params.uiMode=uiMode;
   if(!FG("xefgSwapChainD3D12InitFromSwapChain",p_xefgSwapChainD3D12InitFromSwapChain(fg_,queue,&params)))return false;
-  initializedMax_=count;
+  initializedMax_=count;currentInterp_=count;
   if(!FG("xefgSwapChainD3D12GetSwapChainPtr",p_xefgSwapChainD3D12GetSwapChainPtr(fg_,__uuidof(IDXGISwapChain3),(void**)&swapchain_)))return false;
   const int forcedComposition=Cfg().xessUiComposition; // -1 = auto (enabled unless mode NONE); INI XeSSUiComposition forces 0/1
   const auto composition=forcedComposition>=0?(forcedComposition?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED)
@@ -126,7 +126,12 @@ bool Runtime::AttachPresentation(IDXGISwapChain3* existing,ID3D12CommandQueue* q
 bool Runtime::SetInterpolations(uint32_t count){
   if(!swapchain_ || !count || count>initializedMax_)
     return Fail(RuntimeError::InvalidCall,"Unsupported XeSS interpolation count",count);
+  // Edge-only: the provider re-applies the INI/menu value every present. Calling the SDK every
+  // frame would reset the cadence estimator 36x/s and, per Intel's note, may recompile shaders;
+  // an unchanged count is now a true no-op.
+  if(count==currentInterp_)return true;
   if(!FG("xefgSwapChainSetNumInterpolatedFrames",p_xefgSwapChainSetNumInterpolatedFrames(fg_,count)))return false;
+  currentInterp_=count;
   xess_pacing::Reset(fg_);return true;
 }
 bool Runtime::Sleep(uint32_t id,uint32_t fpsCap,uint32_t outputCap,uint32_t outputs){
@@ -223,7 +228,7 @@ bool Runtime::Shutdown(){
   }
   if(mfgUnlock_){try{mfgUnlock_->Restore();}catch(const std::exception& e){return Fail(RuntimeError::FrameContract,"XeSS MFG restoration failed; SDK modules retained",ERROR_INVALID_DATA);}mfgUnlock_.reset();}
   if(fgModule_)FreeLibrary(fgModule_);if(llModule_)FreeLibrary(llModule_);
-  fgModule_=llModule_=nullptr;properties_={};initializedMax_=lastTagged_=0;tagged_=enabled_=enabledKnown_=false;
+  fgModule_=llModule_=nullptr;properties_={};initializedMax_=lastTagged_=currentInterp_=0;tagged_=enabled_=enabledKnown_=false;
   minimumIntervalUs_=0;
   nativeDevice_=nullptr;
   return true;

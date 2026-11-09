@@ -68,6 +68,7 @@ private:
   xell_version_t llVersion_{};
   RuntimeStatus status_{};
   uint32_t initializedMax_{},lastTagged_{};
+  uint32_t currentInterp_{}; // Cached applied count; the provider re-applies every present and the SDK call must be edge-only (Intel perf note: re-set may recompile shaders/reallocate).
   uint32_t minimumIntervalUs_{};
   bool tagged_{};
   bool enabled_{};

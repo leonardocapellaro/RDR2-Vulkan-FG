@@ -61,11 +61,42 @@ bool Live(const Owner& o) noexcept {
   Value(o.presenter+0x340,hardware) && hardware==0 &&
   Value(o.presenter+0x341,software) && software==1;
 }
+// Field forensics (09/11): the bind has been rejected on the B390 in every session since 11/07,
+// so the pacer never owned a context and x3/x4 stay on the stock SDK path (displayed capped x2).
+// Dump exactly which witness stage failed and the mode flags found — the values decide whether
+// the field SDK uses a different presenter mode we can support, or a layout we must not touch.
+void RejectDetail(const Owner& o) noexcept {
+ static unsigned attempts=0;if(attempts>=4)return;++attempts;
+ auto rd=[&](uintptr_t a,uint32_t& v)->bool{return Value(a,v);};
+ auto rdb=[&](uintptr_t a,uint8_t& v)->bool{return Value(a,v);};
+ uint32_t magic=0;uintptr_t implFound=0,chainFound=0,presenterFound=0,nativeFound=0,deviceFound=0;
+ uint8_t intel=0xEE,hardware=0xEE,software=0xEE;
+ const bool magicOk=rd(uintptr_t(o.context),magic)&&magic==0x47466558;
+ uintptr_t chainProbe=0;
+ const bool implOk=Value(uintptr_t(o.context)+8,implFound)&&implFound==o.implementation;
+ const bool chainOk=Value(o.implementation+8,chainProbe)&&chainProbe==o.chain;
+ chainFound=chainProbe;
+ const bool presOk=Value(o.chain+0x120,presenterFound)&&presenterFound==o.presenter;
+ const bool natOk=Value(o.chain+0x30,nativeFound)&&nativeFound==o.native&&Value(o.presenter+0x18,nativeFound)&&nativeFound==o.native;
+ const bool devOk=Value(o.presenter,deviceFound)&&deviceFound==o.device;
+ const bool flagsRead=rdb(o.presenter+0x64,intel)&&rdb(o.presenter+0x340,hardware)&&rdb(o.presenter+0x341,software);
+ Log("XeSS output pacing: reject detail magicOk=%d(%08x) implOk=%d(%llx) chainOk=%d(%llx) presenterOk=%d(%llx) nativeOk=%d(%llx) deviceOk=%d(%llx) flagsIntel=%u flagsHardware=%u flagsSoftware=%u (pacer requires 0/0/1; 0xEE=unreadable)",
+  (int)magicOk,magic,(int)implOk,(unsigned long long)implFound,(int)chainOk,(unsigned long long)implFound,
+  (int)presOk,(unsigned long long)presenterFound,(int)natOk,(unsigned long long)nativeFound,
+  (int)devOk,(unsigned long long)deviceFound,flagsRead?intel:0xEEu,flagsRead?hardware:0xEEu,flagsRead?software:0xEEu);
+}
 __declspec(noinline) int64_t* Hook(void* timing,int64_t* output,const void* record,const void* summary,uint32_t index,uint32_t total) {
  const auto caller=uintptr_t(_ReturnAddress());
  auto* result=original(timing,output,record,summary,index,total);
  const DWORD error=GetLastError();
  if(result==output && caller==returnSite && index>=1 && total>=2 && total<=4 && index<total){
+  // Forensic breadcrumb (09/11): does the SDK schedule multi-output batches at all while the
+  // pacer owner is unbound? One line per batch-size; proves whether SetNumInterpolatedFrames=2
+  // changes SDK output counts on the stock path or the clamp sits inside the SDK scheduler.
+  static std::atomic<unsigned> unboundSeen[5]{};
+  if(!std::atomic_load_explicit(&owner,std::memory_order_acquire))
+   if(unboundSeen[total].fetch_add(1,std::memory_order_relaxed)==0)
+    Log("XeSS output pacing: SDK batch observed unbound; outputs=%u index=%u (SetNumInterpolatedFrames visible on stock path)",total,index);
   try {
    auto current=std::atomic_load_explicit(&owner,std::memory_order_acquire);
    if(current && uintptr_t(timing)==current->presenter+0x168 && Stack(uintptr_t(output),sizeof(*output)) &&
@@ -167,7 +198,8 @@ bool Bind(void* context,ID3D12Device* device) noexcept {
      !Value(current->implementation+8,current->chain) ||
      !Value(current->chain+0x120,current->presenter) ||
      !Value(current->chain+0x30,current->native) || !Live(*current)){
-   Log("XeSS output pacing: context ownership/mode rejected; SDK deadline retained");return false;
+   Log("XeSS output pacing: context ownership/mode rejected; SDK deadline retained");
+   RejectDetail(*current);return false;
   }
   auto previous=std::atomic_load_explicit(&owner,std::memory_order_acquire);
   if(previous && !previous->retired.load(std::memory_order_acquire))return false;
