@@ -14,6 +14,8 @@ void HudCaptureReleaseRetired(uint64_t owner);
 PFN_vkVoidFunction HudCaptureWrap(const char*, PFN_vkVoidFunction);
 FfxApiResource HudCaptureResource();
 uint64_t HudCaptureFrameIndex();
+int HudCaptureLastReject();
+bool HudCaptureHasImage();
 bool HudCaptureFramebufferIsSwapchain(VkFramebuffer);
 void HudCaptureExecuted(VkCommandBuffer,uint32_t,const VkCommandBuffer*);
 void HudCaptureBeforePass(VkCommandBuffer, const VkRenderPassBeginInfo*);

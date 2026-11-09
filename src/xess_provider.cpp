@@ -715,9 +715,12 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
  static ULONGLONG missingHudSince=0,missingInputSince=0;
  const auto inputNow=GetTickCount64();
  if(attached && !off && in && in->valid && !haveHud){
-  if(!missingHudSince)missingHudSince=inputNow;
+  if(!missingHudSince){missingHudSince=inputNow;
+   // Always-on forensic pair: one 2-minute gameplay session answers "why did FG drop" from the log.
+   // lastReject: 0=accepted 1=pass/meta 2=extent 4=format 5=loadOp 6=UNDEFINED-layout 7=samples 8=view 9=not-swapchain.
+   Log("HUD-less miss start: epoch=%llu order=%llu hudIdx=%llu lastReject=%d hasImage=%d",(unsigned long long)f.epoch,(unsigned long long)in->order,(unsigned long long)HudCaptureFrameIndex(),HudCaptureLastReject(),(int)HudCaptureHasImage());}
   if(inputNow-missingHudSince>=500)Error(RuntimeErrors::Code::InputInvalid,"HUD-less post-tone-map pass missing for over 500 ms; waiting for a matching current-frame snapshot, native rendering and menu continue");
- }else{missingHudSince=0;if(haveHud)RuntimeErrors::ClearError(RuntimeErrors::Code::InputInvalid);}
+ }else{if(missingHudSince&&haveHud)Log("HUD-less miss end: epoch=%llu missed=%llums hudIdx=%llu",(unsigned long long)f.epoch,(unsigned long long)(inputNow-missingHudSince),(unsigned long long)HudCaptureFrameIndex());missingHudSince=0;if(haveHud)RuntimeErrors::ClearError(RuntimeErrors::Code::InputInvalid);}
  if(attached && !off && !in && haveHud){
   if(!missingInputSince)missingInputSince=inputNow;
   if(inputNow-missingInputSince>=15000)Error(RuntimeErrors::Code::InputMissing,"No captured DLSS depth/MV inputs for 15 seconds while final-color rendering continues; verify in-game DLSS and other upscaling hooks");
@@ -725,7 +728,9 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
  static bool lastEligible=false;static uint32_t resetStreak=0;
  if(generate)resetStreak=in->constants.resetHistory?resetStreak+1:0;else resetStreak=0;
  if(generate!=lastEligible || (generate && resetStreak==60)){
-  LogDebug("XeSS eligibility: epoch=%llu eligible=%d input=%llu valid=%d hud=%d userOff=%d reset=%u resetStreak=%u",(unsigned long long)f.epoch,(int)generate,(unsigned long long)(in?in->order:0),(int)(in&&in->valid),(int)haveHud,(int)off,in?in->constants.resetHistory:0,resetStreak);lastEligible=generate;
+  // Always-on (not debug-gated): eligibility flips are the exact FG on/off intervals; one
+  // short gameplay capture with DebugLogging=0 can then prove FG uptime from the log alone.
+  Log("XeSS eligibility: epoch=%llu eligible=%d input=%llu valid=%d hud=%d userOff=%d reset=%u resetStreak=%u",(unsigned long long)f.epoch,(int)generate,(unsigned long long)(in?in->order:0),(int)(in&&in->valid),(int)haveHud,(int)off,in?in->constants.resetHistory:0,resetStreak);lastEligible=generate;
  }
  if(!Vk(Fn<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(f.command,0),"XeSS upload command reset"))return VK_ERROR_DEVICE_LOST;
  VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;

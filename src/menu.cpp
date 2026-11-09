@@ -86,6 +86,7 @@ static BOOL WINAPI CursorClip(const RECT* rect){
   if(open && GetForegroundWindow()==game){std::lock_guard<std::mutex> lock(inputMutex);hasClip=rect!=nullptr;if(rect)desiredClip=*rect;return originalClipCursor(nullptr);}
   return originalClipCursor(rect);
 }
+static ULONGLONG queueToggleAt=0;
 static void Toggle(bool value){
   if(open.exchange(value)==value)return;
   // Diagnóstico de campo: sem esta linha nao sabemos se a tecla do menu chegou.
@@ -110,6 +111,16 @@ static const char* KeyName(int vk){
   else snprintf(buffer,sizeof(buffer),"VK 0x%X",vk);
   return buffer;
 }
+void MenuToggleFromPoll(){
+  // Present-loop backstop for the menu key (GetAsyncKeyState edge). Skips if the message-queue
+  // handler reacted to the same press moments ago; when the game's queue never delivers keyboard
+  // messages, this path is the only one that can open the menu.
+  const ULONGLONG now=GetTickCount64();
+  if(now-queueToggleAt<500)return;
+  queueToggleAt=now;
+  Log("hotkey: menu key %s seen by present-loop poll",KeyName(Rt().menuKey.load()));
+  Toggle(!open);
+}
 static LRESULT ProcessGameMessage(HWND w,UINT m,WPARAM a,LPARAM b){
   // Uma linha por evento-chave, limitada: prova que o hook de mensagens ve o
   // mouse/teclado do jogo (a pista de que clique no menu pode nao estar vivo).
@@ -117,7 +128,18 @@ static LRESULT ProcessGameMessage(HWND w,UINT m,WPARAM a,LPARAM b){
   if(m==WM_LBUTTONDOWN&&seenClick<3){++seenClick;Log("menu input: left click observed in game queue (menu open=%d tid=%lu)",(int)open,(unsigned long)GetCurrentThreadId());}
   if(m==WM_MOUSEMOVE&&seenMove<1){++seenMove;Log("menu input: mouse movement observed in game queue");}
   if(captureMenuKey && m==WM_KEYDOWN){if((int)a!=VK_ESCAPE)SaveMenuKey((int)a);captureMenuKey=false;return 0;}
-  if(m==WM_KEYDOWN && (int)a==Rt().menuKey.load() && rendererAvailable){if(!(b&(1LL<<30)))Toggle(!open);return 0;}
+  if(m==WM_KEYDOWN && (int)a==Rt().menuKey.load()){
+    if(!(b&(1LL<<30))){
+      // Always-on proof that the key reached the queue, plus the toggle itself is no longer
+      // gated on rendererAvailable: the overlay render path keeps retrying init every present,
+      // and the "renderer=" flag now distinguishes "key lost" from "renderer never initialized".
+      static int seenMenuKey=0;
+      if(seenMenuKey<5){++seenMenuKey;Log("menu input: menu key %s observed in game queue (renderer=%d open=%d tid=%lu)",KeyName((int)a),(int)rendererAvailable.load(),(int)open,(unsigned long)GetCurrentThreadId());}
+      queueToggleAt=GetTickCount64();
+      Toggle(!open);
+    }
+    return 0;
+  }
   if(m==WM_KEYUP && (int)a==Rt().menuKey.load())return 0;
   if(m==WM_KILLFOCUS)Toggle(false);
   if(m==WM_KILLFOCUS || m==WM_SETFOCUS)QueueInput(m,a,b);
@@ -232,7 +254,7 @@ bool MenuInitializeUI(){
   }
   showFPS=LoadFPSCounter();fpsCapSetting=(int)LoadFPSCap();Rt().fpsCap=(uint32_t)fpsCapSetting;experiment::SetEnabled(Cfg().diagnostics);SetCoreIntervalTracing(Cfg().intervalLogging);ImGui::GetIO().FontGlobalScale=1.0f;nextProvider=Cfg().provider==FGProvider::XeSS?1:0;initialized=true;
   RuntimeErrors::ClearError(RuntimeErrors::Code::MenuInit);StartUpdateCheck();StartFGPresetMonitor();
-  Log("Menu ready: native Vulkan overlay, Insert toggles game UI; no secondary window");return true;
+  Log("Menu ready: native Vulkan overlay, %s toggles game UI; no secondary window",KeyName(Rt().menuKey.load()));return true;
 }
 static void PollFallbackInput(){
   if(messageHook || !initialized)return;

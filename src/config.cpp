@@ -57,6 +57,9 @@ bool PollHotkeys(){
     Log("menu: FG=%d mode=x%u",!off,frames+1);changed=true;
   }
   bool gameFocused=false;auto foreground=GetForegroundWindow();DWORD foregroundPid{};if(foreground)GetWindowThreadProcessId(foreground,&foregroundPid);gameFocused=foregroundPid==GetCurrentProcessId();
+  static bool wM=false;
+  bool menu=Pressed(g_rt.menuKey.load(),wM); // queue-independent backstop; dedups against the message handler
+  if(menu&&gameFocused)MenuToggleFromPoll();
   bool toggle=Pressed(g_cfg.keyToggleFG,wT),cycle=Pressed(g_cfg.keyCycleFrames,wC);
   if((toggle||cycle)&&!gameFocused)Log("hotkey: %s ignored — foreground window is not the game (vk=0x%x)",cycle?"cycle":"toggle",cycle?g_cfg.keyCycleFrames:g_cfg.keyToggleFG);
   if(gameFocused && toggle){ g_rt.fgUserOff = !g_rt.fgUserOff; Log("hotkey: FG %s by user", g_rt.fgUserOff?"OFF":"ON"); changed=true; }
@@ -161,7 +164,7 @@ void LoadConfig(){
   c.nativeHudProtection=GetPrivateProfileIntA("fgvk","NativeHUDProtection",1,path)!=0;
   c.tagUI       = GetPrivateProfileIntA("fgvk","TagUI",c.tagUI?1:0,path)!=0;
   c.capturePresentTransfers=GetPrivateProfileIntA("fgvk","CapturePresentTransfers",c.capturePresentTransfers?1:0,path)!=0;
-  {int m=GetPrivateProfileIntA("fgvk","XeSSUiMode",(int)c.xessUiMode,path);c.xessUiMode=(uint32_t)((m<1||m>5)?4:m);}
+  {int m=GetPrivateProfileIntA("fgvk","XeSSUiMode",(int)c.xessUiMode,path);c.xessUiMode=(uint32_t)((m<1||m>5)?1:m);}
   {int s=GetPrivateProfileIntA("fgvk","XeSSUiComposition",-1,path);c.xessUiComposition=(s==0?0:(s==1?1:-1));}
   c.xessSynthUI=GetPrivateProfileIntA("fgvk","XeSSSynthUI",c.xessSynthUI?1:0,path)!=0;
   c.antiTearing=ReadStabilityOption("AntiTearing",false);

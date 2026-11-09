@@ -11,6 +11,7 @@ void RecordGamePresent();
 void RecordDisplayedFrames(uint32_t displayedFrames);
 void SetFPSGenerationActive(bool active);
 bool MenuIsOpen();
+void MenuToggleFromPoll();
 void MenuRendererAvailable(bool available);
 bool MenuInitializeUI();
 bool MenuHasDrawing();

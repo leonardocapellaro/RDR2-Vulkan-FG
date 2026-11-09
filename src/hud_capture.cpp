@@ -4,6 +4,7 @@
 #include "ffx_api/vk/ffx_api_vk.h"
 #include <detours.h>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -44,6 +45,13 @@ bool loggedCapture{};
 bool loggedTransferCapture{};
 bool loggedFailure{};
 uint64_t activeFrame{};
+// The capture's own acquire window: recorded at capture time (not inferred from activeFrame at
+// query time, which flips to the next frame when the game queues frames ahead of presenting).
+uint64_t capturedFrame{};
+// Forensics: why the most recently evaluated render pass was not a HUD-less candidate
+// (0=accepted, 1=pass/framebuffer metadata or offset gate, 2=extent, 3=not color-marked,
+// 4=format, 5=loadOp!=LOAD, 6=initialLayout UNDEFINED, 7=samples, 8=view/subresource, 9=image not in swapchain set).
+std::atomic<int> lastReject{};
 VkRenderPass capturedPass{};
 VkFramebuffer capturedFramebuffer{};
 
@@ -73,7 +81,7 @@ void DestroyCaptureImage() {
   if (captureImage && destroyImage) destroyImage(device, captureImage, nullptr);
   if (captureMemory && freeMemory) freeMemory(device, captureMemory, nullptr);
   captureImage = VK_NULL_HANDLE; captureMemory = VK_NULL_HANDLE;
-  initializedLayout = false; capturedAvailable = false; capturedThisFrame = false;
+  initializedLayout = false; capturedAvailable = false; capturedThisFrame = false; capturedFrame = 0;
 }
 
 bool CreateCaptureImage() {
@@ -131,22 +139,29 @@ bool CreateCaptureImage() {
 }
 
 bool CaptureCandidate(const VkRenderPassBeginInfo* begin, VkImage& source, VkImageLayout& oldLayout, VkRenderPass& passOut, VkFramebuffer& framebufferOut) {
-  if (!begin || !begin->renderPass || !begin->framebuffer || begin->renderArea.offset.x || begin->renderArea.offset.y ||
-      begin->renderArea.extent.width!=captureExtent.width || begin->renderArea.extent.height!=captureExtent.height) return false;
+  if (!begin || !begin->renderPass || !begin->framebuffer || begin->renderArea.offset.x || begin->renderArea.offset.y) {lastReject=1;return false;}
+  if (begin->renderArea.extent.width!=captureExtent.width || begin->renderArea.extent.height!=captureExtent.height) {lastReject=2;return false;}
   std::lock_guard<std::mutex> lock(metadataMutex);
   auto fb=framebuffers.find(begin->framebuffer); auto rp=renderPasses.find(begin->renderPass);
   if (fb==framebuffers.end() || rp==renderPasses.end() ||
       fb->second.width!=captureExtent.width || fb->second.height!=captureExtent.height || fb->second.layers!=1 ||
-      fb->second.views.size()!=rp->second.attachments.size()) return false;
+      fb->second.views.size()!=rp->second.attachments.size()) {lastReject=1;return false;}
+  int reject=0;
   for (size_t i=0;i<rp->second.attachments.size();++i) {
     const auto& a=rp->second.attachments[i];
-    if (!a.color || a.format!=captureFormat || a.load!=VK_ATTACHMENT_LOAD_OP_LOAD || a.initial==VK_IMAGE_LAYOUT_UNDEFINED || a.samples!=VK_SAMPLE_COUNT_1_BIT) continue;
+    if (!a.color) continue;
+    if (a.format!=captureFormat) {reject=4;continue;}
+    if (a.load!=VK_ATTACHMENT_LOAD_OP_LOAD) {reject=5;continue;}
+    if (a.initial==VK_IMAGE_LAYOUT_UNDEFINED) {reject=6;continue;}
+    if (a.samples!=VK_SAMPLE_COUNT_1_BIT) {reject=7;continue;}
     auto vi=views.find(fb->second.views[i]); if (vi==views.end() || vi->second.format!=captureFormat ||
         !(vi->second.range.aspectMask&VK_IMAGE_ASPECT_COLOR_BIT) || vi->second.range.baseMipLevel!=0 || vi->second.range.levelCount!=1 ||
-        vi->second.range.baseArrayLayer!=0 || vi->second.range.layerCount!=1) continue;
-    if (swapchainImages.find(vi->second.image)==swapchainImages.end()) continue;
+        vi->second.range.baseArrayLayer!=0 || vi->second.range.layerCount!=1) {reject=8;continue;}
+    if (swapchainImages.find(vi->second.image)==swapchainImages.end()) {reject=9;continue;}
+    lastReject=0;
     source=vi->second.image; oldLayout=a.initial; passOut=begin->renderPass; framebufferOut=begin->framebuffer; return true;
   }
+  lastReject=reject;
   return false;
 }
 
@@ -169,6 +184,7 @@ void RecordCapture(VkCommandBuffer cmd, VkImage source, VkImageLayout sourceLayo
   b[1].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
   barrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,2,b);
   initializedLayout=true; capturedAvailable=!IsDX12Bridge(Cfg().provider); capturedThisFrame=true;
+  capturedFrame=activeFrame; // stamp the acquire window this capture belongs to at record time
   captureCommands.insert(cmd);
   if (!loggedCapture) { loggedCapture=true; Log("HUD capture first success: frame=%llu renderPass=%p framebuffer=%p",(unsigned long long)activeFrame,(void*)capturedPass,(void*)capturedFramebuffer); }
 }
@@ -194,7 +210,9 @@ VKAPI_ATTR VkResult VKAPI_CALL WrapCreateRenderPass(VkDevice d,const VkRenderPas
   if (r==VK_SUCCESS && ci && out) {
     PassInfo p{};p.attachments.reserve(ci->attachmentCount);
     for (uint32_t i=0;i<ci->attachmentCount;++i) {const auto& x=ci->pAttachments[i];p.attachments.push_back({x.format,x.samples,x.loadOp,x.initialLayout,false});}
-    for (uint32_t s=0;s<ci->subpassCount;++s) {const auto& sub=ci->pSubpasses[s];if(s!=0)continue;for(uint32_t i=0;i<sub.colorAttachmentCount;++i)if(sub.pColorAttachments[i].attachment<p.attachments.size())p.attachments[sub.pColorAttachments[i].attachment].color=true;}
+    // All subpasses mark color attachments, matching the RenderPass2 hook below — a final pass
+    // referenced only from subpass>0 was invisibly permanent-miss for the v1 hook (RDR2 wheel/menu variants).
+    for (uint32_t s=0;s<ci->subpassCount;++s) {const auto& sub=ci->pSubpasses[s];for(uint32_t i=0;i<sub.colorAttachmentCount;++i)if(sub.pColorAttachments[i].attachment<p.attachments.size())p.attachments[sub.pColorAttachments[i].attachment].color=true;}
     std::lock_guard<std::mutex> lock(metadataMutex);renderPasses[*out]=std::move(p);
   }
   return r;
@@ -314,7 +332,7 @@ void HudCaptureRetire(uint64_t owner){
   auto& retired=retiredCaptures[owner];retired.device=device;retired.get=gdpa;
   retired.image=captureImage;retired.memory=captureMemory;retired.sources=std::move(swapchainImages);
   captureImage={};captureMemory={};swapchainImages.clear();captureCommands.clear();
-  initializedLayout=capturedThisFrame=capturedAvailable=false;activeFrame=0;
+  initializedLayout=capturedThisFrame=capturedAvailable=false;activeFrame=0;capturedFrame=0;
 }
 void HudCaptureReleaseRetired(uint64_t owner){
   std::lock_guard<std::mutex> guard(captureMutex);
@@ -350,7 +368,7 @@ PFN_vkVoidFunction HudCaptureWrap(const char* name,PFN_vkVoidFunction fn) {
 }
 
 void HudCaptureBeginFrame(uint64_t frameId) {
-  std::lock_guard<std::mutex> lock(captureMutex);activeFrame=frameId;capturedThisFrame=false;capturedAvailable=false;
+  std::lock_guard<std::mutex> lock(captureMutex);activeFrame=frameId;capturedThisFrame=false;capturedAvailable=false;capturedFrame=0;
 }
 void HudCaptureForgetCommand(VkCommandBuffer cmd){std::lock_guard<std::mutex> lock(captureMutex);captureCommands.erase(cmd);}
 void HudCaptureOnSubmit(uint32_t count,const VkCommandBuffer* commands){
@@ -372,7 +390,9 @@ FfxApiResource HudCaptureResource() {
   if (!captureImage || !capturedAvailable) return r;
   r.resource=(void*)captureImage;r.description=captureDescription;r.state=FFX_API_RESOURCE_STATE_COMPUTE_READ;return r;
 }
-uint64_t HudCaptureFrameIndex(){std::lock_guard<std::mutex> guard(captureMutex);return capturedAvailable?activeFrame:0;}
+uint64_t HudCaptureFrameIndex(){std::lock_guard<std::mutex> guard(captureMutex);return capturedAvailable?capturedFrame:0;}
+int HudCaptureLastReject(){return lastReject.load();}
+bool HudCaptureHasImage(){std::lock_guard<std::mutex> guard(captureMutex);return captureImage!=VK_NULL_HANDLE;}
 bool HudCaptureFramebufferIsSwapchain(VkFramebuffer fb){
  std::lock_guard<std::mutex> guard(metadataMutex);auto found=framebuffers.find(fb);if(found==framebuffers.end())return false;
  for(auto v:found->second.views){auto vi=views.find(v);if(vi!=views.end()){if(swapchainImages.count(vi->second.image))return true;for(const auto& old:retiredCaptures)if(old.second.sources.count(vi->second.image))return true;}}return false;
