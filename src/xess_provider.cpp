@@ -632,7 +632,7 @@ bool XessPrepare(VkCommandBuffer cmd,VkImage depthImage,VkImage motionImage,uint
  // by the tagged extent; preserve the captured NGX pixel displacement exactly.
  in.slConstants=constants;
  const bool dimensionsChanged=inputDimensions.Changed(dw,dh);
- if(dimensionsChanged){in.constants.resetHistory=1;in.slConstants.reset=sl::Boolean::eTrue;Log("Bridge input size changed: %ux%u; resetting provider history",dw,dh);}
+ if(dimensionsChanged){in.constants.resetHistory=1;in.slConstants.reset=sl::Boolean::eTrue;if(Cfg().xessSynthUI)SynthUiReset();Log("Bridge input size changed: %ux%u; resetting provider history",dw,dh);}
  in.slConstants.jitterOffset={jx,jy};
  auto scale=MvecScaleForStreamline(sx,sy,mw,mh,true);in.slConstants.mvecScale={scale.x,scale.y};
  in.slConstants.depthInverted=sl::Boolean::eTrue;in.slConstants.cameraMotionIncluded=sl::Boolean::eTrue;
@@ -790,7 +790,7 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
    for(unsigned col=0;col<3;++col){float dot=0;for(unsigned row=0;row<3;++row){in->constants.viewMatrix[row*4+col]=(&axes[col].x)[row];dot+=(&c.cameraPos.x)[row]*(&axes[col].x)[row];}in->constants.viewMatrix[12+col]=-dot;}
   }
   in->constants.resetHistory=in->slConstants.reset==sl::Boolean::eTrue;
-  if(resumeHistory.NeedsReset(f.epoch) || presentedDimensions.Changed(in->dw,in->dh)){in->constants.resetHistory=1;in->slConstants.reset=sl::Boolean::eTrue;}
+  if(resumeHistory.NeedsReset(f.epoch) || presentedDimensions.Changed(in->dw,in->dh)){in->constants.resetHistory=1;in->slConstants.reset=sl::Boolean::eTrue;if(Cfg().xessSynthUI)SynthUiReset();}
   SharedImage* resources[]={&in->snapshot->hudless,&in->snapshot->depth,&in->snapshot->motion,&f.ui};
   const uint32_t tagCount=c.uiSynth?4u:3u;
   xefg_swapchain_d3d12_resource_data_t tags[4]{};

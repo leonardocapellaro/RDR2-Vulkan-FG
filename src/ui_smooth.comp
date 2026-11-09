@@ -1,0 +1,26 @@
+#version 450
+// Temporal EMA of the synthetic UI layer produced by ui_diff.comp:
+//   smooth = mix(previous, raw, weight); the first frame after init/reset copies raw.
+// Rationale: the raw alpha estimate (max channel delta) is noisy wherever a translucent
+// UI overlays moving background; a stationary UI (weapon wheel, minimap) converges within
+// ~2-3 frames while the per-frame estimation noise averages out. Blending is component-wise,
+// so it is invariant to the staging BGRA pre-swizzle (both buffers hold the same component order).
+// The snapshot-then-write pattern below keeps the read and the write on the same texel inside
+// one invocation, which Vulkan orders implicitly; cross-invocation there is no overlap.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0) uniform sampler2D rawLayer;
+layout(set = 0, binding = 1) uniform sampler2D unusedInput; // set layout is shared with ui_diff.comp; keep a valid image bound
+layout(set = 0, binding = 2, rgba8) uniform image2D accumulate;
+layout(push_constant) uniform Params { uint width; uint height; uint swizzleBGRA; float weight; uint firstFrame; } params;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(params.width) || p.y >= int(params.height)) return;
+    vec4 raw = texelFetch(rawLayer, p, 0);
+    if (params.firstFrame != 0) { imageStore(accumulate, p, raw); return; }
+    vec4 value = mix(imageLoad(accumulate, p), raw, params.weight);
+    // Snap near-black pixels so a vanished UI element fades to a hard zero instead of an
+    // unbounded EMA tail (premultiplied black is black in any component order).
+    if (max(max(value.r, value.g), max(value.b, value.a)) < (1.5 / 255.0)) value = vec4(0.0);
+    imageStore(accumulate, p, value);
+}

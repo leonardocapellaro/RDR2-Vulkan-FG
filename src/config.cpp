@@ -167,6 +167,7 @@ void LoadConfig(){
   {int m=GetPrivateProfileIntA("fgvk","XeSSUiMode",(int)c.xessUiMode,path);c.xessUiMode=(uint32_t)((m<1||m>5)?1:m);}
   {int s=GetPrivateProfileIntA("fgvk","XeSSUiComposition",-1,path);c.xessUiComposition=(s==0?0:(s==1?1:-1));}
   c.xessSynthUI=GetPrivateProfileIntA("fgvk","XeSSSynthUI",c.xessSynthUI?1:0,path)!=0;
+  {int sm=GetPrivateProfileIntA("fgvk","XeSSSynthSmooth",c.xessSynthSmooth,path);c.xessSynthSmooth=(sm<0||sm>100)?35:sm;}
   c.antiTearing=ReadStabilityOption("AntiTearing",false);
   c.antiGhostHistory=ReadStabilityOption("AntiGhostHistory",true);
   { char v[32]{};GetPrivateProfileStringA("fgvk","DepthSeparation","",v,sizeof(v),path);if(v[0]){float f=(float)atof(v);if(f>=1.f&&f<=200.f)c.depthSeparation=f;} }
