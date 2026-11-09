@@ -18,7 +18,7 @@ VkPipelineLayout pipelineLayout{}; VkPipeline pipeline{};
 // (raw ring slot sampled + accumulator storage -> accumulator). emaWeight==0 disables it.
 VkImage accum{}; VkDeviceMemory accumMemory{}; VkImageView accumView{}; bool accumInitialized{};
 VkPipelineLayout smoothLayout{}; VkPipeline smoothPipeline{}; VkDescriptorSet smoothSets[RingCount]{};
-float emaWeight{};
+float emaWeight{}; bool debugTint{}; // XeSSSynthDebugTint: magenta-paint the layer (SDK consumption proof)
 uint32_t ringCursor{}; bool failedLogged{}; bool successLogged{};
 std::unordered_map<VkImage,VkImageView> inputViews;
 std::mutex gate;
@@ -143,7 +143,7 @@ bool CreatePipeline(){
   VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};si.magFilter=si.minFilter=VK_FILTER_NEAREST;si.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
   si.addressModeU=si.addressModeV=si.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;si.maxLod=0;
   if(createSampler(device,&si,nullptr,&sampler)!=VK_SUCCESS)return false;
-  VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT,0,12};VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT,0,16};VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
   pli.setLayoutCount=1;pli.pSetLayouts=&setLayout;pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;
   if(createPL(device,&pli,nullptr,&pipelineLayout)!=VK_SUCCESS)return false;
   VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};smi.codeSize=UiDiffSpirvSize;smi.pCode=UiDiffSpirv;
@@ -164,6 +164,7 @@ void Barrier(VkCommandBuffer cmd,VkImage image,VkImageLayout oldLayout,VkImageLa
 void SynthUiInit(VkDevice d,VkPhysicalDevice pd,PFN_vkGetDeviceProcAddr getProc,VkFormat fmt,VkExtent2D size){
   std::lock_guard<std::mutex> lock(gate);DestroyAll();device=d;physical=pd;gdpa=getProc;format=fmt;extent=size;failedLogged=false;successLogged=false;ringCursor=0;
   const int smooth=Cfg().xessSynthSmooth;emaWeight=smooth<=0?0.f:(smooth>100?.35f:(float)smooth/100.f);
+  debugTint=Cfg().xessSynthDebugTint;
   if((fmt!=VK_FORMAT_R8G8B8A8_UNORM&&fmt!=VK_FORMAT_B8G8R8A8_UNORM)||!size.width||!size.height){FailOnce("only 8-bit UNORM SDR backbuffers are supported");return;}
   for(uint32_t i=0;i<RingCount;++i)if(!CreateStaging(i)){DestroyAll();FailOnce("staging allocation failed");return;}
   if(!CreatePipeline()){DestroyAll();FailOnce("Vulkan pipeline creation failed");return;}
@@ -211,7 +212,7 @@ bool SynthUiRecord(VkCommandBuffer cmd,VkImage presented,VkImage hudless,VkImage
           0,VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
           VK_QUEUE_FAMILY_EXTERNAL,family);
   bindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline);bindSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,pipelineLayout,0,1,&sets[slot],0,nullptr);
-  uint32_t params[3]={extent.width,extent.height,format==VK_FORMAT_B8G8R8A8_UNORM?1u:0u};push(cmd,pipelineLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(params),params);
+  uint32_t params[4]={extent.width,extent.height,format==VK_FORMAT_B8G8R8A8_UNORM?1u:0u,(uint32_t)debugTint};push(cmd,pipelineLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(params),params);
   dispatch(cmd,(extent.width+7)/8,(extent.height+7)/8,1);
   // With smoothing the raw layer stays GENERAL and the EMA pass samples it afterwards; without
   // smoothing the ring slot goes straight to the copy source as before.
@@ -250,7 +251,7 @@ bool SynthUiRecord(VkCommandBuffer cmd,VkImage presented,VkImage hudless,VkImage
   if(ema)Barrier(cmd,accum,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,VK_ACCESS_TRANSFER_READ_BIT,0,
           VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED);
   stagingInitialized[slot]=true;accumInitialized=true;
-  if(!successLogged){successLogged=true;Log("Synthetic UI layer first frame: %ux%u format=%u (premultiplied B-(1-a)*C, ring=%u, smoothing=%d)",extent.width,extent.height,(uint32_t)format,RingCount,ema?1:0);}
+  if(!successLogged){successLogged=true;Log("Synthetic UI layer first frame: %ux%u format=%u (premultiplied B-(1-a)*C, ring=%u, smoothing=%d, tint=%d)",extent.width,extent.height,(uint32_t)format,RingCount,ema?1:0,(int)debugTint);}
   return true;
 }
 }

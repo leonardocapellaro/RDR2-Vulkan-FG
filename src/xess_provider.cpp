@@ -556,9 +556,16 @@ VkResult XessCreateSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const
  }
  c.uiMode=uiModeCfg;
  if(synthReady&&(uiModeCfg==3||uiModeCfg==5))Log("XeSS synthetic UI armed: tagging premultiplied UI layer for UI mode %u",uiModeCfg);
+ uint32_t interpCap=1;
  if(sdkAvailable){
   const auto uiMode=(xefg_swapchain_ui_mode_t)uiModeCfg; // default 4 = BACKBUFFER_HUDLESS (author's choice)
-  attached=sdk.CreatePresentation(c.window,dxQueue,factory,desc,XEFG_SWAPCHAIN_INIT_FLAG_INVERTED_DEPTH,1,uiMode,&target.fullscreen,target.output);
+  // v4.4: the swapchain used to be created with maxInterpolatedFrames=1 — a hard x2 ceiling that
+  // silently defeated both the INI multiplier and the menu (SetInterpolations could never exceed
+  // the creation cap; 08/11 23:48/23:51 sessions prove: DLSSGFrames=2 in INI, displayed stuck=2).
+  // The SDK documents heap sizes as valid for any count up to the creation max, so we create with
+  // the SDK maximum and the per-present SetInterpolations(multiplier) call picks the real count.
+  interpCap=(std::max)(1u,sdk.MaxInterpolations());
+  attached=sdk.CreatePresentation(c.window,dxQueue,factory,desc,XEFG_SWAPCHAIN_INIT_FLAG_INVERTED_DEPTH,interpCap,uiMode,&target.fullscreen,target.output);
   if(attached){sdkFailed=false;c.dx=sdk.Swapchain();c.dx->AddRef();dxQueue=sdk.Queue(nativeDxQueue);RuntimeErrors::ClearError(RuntimeErrors::Code::ProviderInit);RuntimeErrors::ClearError(RuntimeErrors::Code::HardwareScheduling);}else{SdkError();sdk.Shutdown();sdkAvailable=false;}
  }
  c.uiSynth=attached&&synthReady&&(c.uiMode==3||c.uiMode==5);
@@ -584,7 +591,7 @@ VkResult XessCreateSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const
  std::vector<VkImage> images;for(auto& f:c.frames)images.push_back(f.image);
  HudCaptureInit(device,physical,XessMenuGDPA,c.format,c.extent,images);
  MenuCaptureImages(device,c.handle,(uint32_t)images.size(),images.data());
- Log("XeSS experimental virtual swapchain: %ux%u images=%zu SDK=%d maxInterpolations=%u allowTearing=%d syncInterval=%u uiMode=%u uiComposition=%d",c.extent.width,c.extent.height,c.frames.size(),(int)attached,sdkAvailable?sdk.MaxInterpolations():0,(int)c.allowTearing,Cfg().antiTearing?1u:0u,(unsigned)uiModeCfg,(int)Cfg().xessUiComposition);
+ Log("XeSS experimental virtual swapchain: %ux%u images=%zu SDK=%d maxInterpolations=%u createdInterp=%u allowTearing=%d syncInterval=%u uiMode=%u uiComposition=%d",c.extent.width,c.extent.height,c.frames.size(),(int)attached,sdkAvailable?sdk.MaxInterpolations():0,interpCap,(int)c.allowTearing,Cfg().antiTearing?1u:0u,(unsigned)uiModeCfg,(int)Cfg().xessUiComposition);
  return VK_SUCCESS;
 }
 bool XessPrepare(VkCommandBuffer cmd,VkImage depthImage,VkImage motionImage,uint32_t dw,uint32_t dh,uint32_t mw,uint32_t mh,
@@ -707,6 +714,8 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
  multiplier=(std::max)(1u,(std::min)(multiplier,(std::max)(1u,sdk.MaxInterpolations())));Rt().frames=multiplier;
  Rt().maxFrames=(std::max)(1u,sdk.MaxInterpolations());
  if(attached && !sdkFailed && !sdk.SetInterpolations(multiplier))SdkError(false);
+ static uint32_t loggedMultiplier=0;
+ if(attached && !sdkFailed && multiplier!=loggedMultiplier){loggedMultiplier=multiplier;Log("XeSS interpolation target set: x%u (swapchain cap x%u, INI/menu path applied)",multiplier+1,(std::max)(1u,sdk.MaxInterpolations())+1);}
  UpdateMenuRuntime(off,multiplier);
  bool generate=attached && !sdkFailed && in && in->valid && haveHud && !off && HasRecentDLSSInput();
  if(in && in->epoch==0 && drain.size()!=1)generate=false;

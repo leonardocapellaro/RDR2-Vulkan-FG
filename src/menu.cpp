@@ -122,8 +122,8 @@ void MenuToggleFromPoll(){
   Toggle(!open);
 }
 static LRESULT ProcessGameMessage(HWND w,UINT m,WPARAM a,LPARAM b){
-  // Uma linha por evento-chave, limitada: prova que o hook de mensagens ve o
-  // mouse/teclado do jogo (a pista de que clique no menu pode nao estar vivo).
+  // One line per event kind, rate-limited: proves the message hook sees the game's
+  // mouse/keyboard (the clue that menu clicks may not be alive).
   static int seenClick=0,seenMove=0;
   if(m==WM_LBUTTONDOWN&&seenClick<3){++seenClick;Log("menu input: left click observed in game queue (menu open=%d tid=%lu)",(int)open,(unsigned long)GetCurrentThreadId());}
   if(m==WM_MOUSEMOVE&&seenMove<1){++seenMove;Log("menu input: mouse movement observed in game queue");}
@@ -134,8 +134,14 @@ static LRESULT ProcessGameMessage(HWND w,UINT m,WPARAM a,LPARAM b){
       // gated on rendererAvailable: the overlay render path keeps retrying init every present,
       // and the "renderer=" flag now distinguishes "key lost" from "renderer never initialized".
       static int seenMenuKey=0;
-      if(seenMenuKey<5){++seenMenuKey;Log("menu input: menu key %s observed in game queue (renderer=%d open=%d tid=%lu)",KeyName((int)a),(int)rendererAvailable.load(),(int)open,(unsigned long)GetCurrentThreadId());}
-      queueToggleAt=GetTickCount64();
+      // Dedup must work in BOTH directions: the 08/11 23:43 session logged the present-loop
+      // poll opening the menu and this queue path closing the same physical press 9 ms later
+      // (poll fires on the key-down edge; the queue message arrives right after it).
+      const ULONGLONG now=GetTickCount64();
+      const bool duplicate=now-queueToggleAt<500;
+      if(seenMenuKey<5){++seenMenuKey;Log("menu input: menu key %s observed in game queue (renderer=%d open=%d dedup=%d tid=%lu)",KeyName((int)a),(int)rendererAvailable.load(),(int)open,(int)duplicate,(unsigned long)GetCurrentThreadId());}
+      if(duplicate)return 0;
+      queueToggleAt=now;
       Toggle(!open);
     }
     return 0;

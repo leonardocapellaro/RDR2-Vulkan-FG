@@ -41,6 +41,7 @@ struct Config {
   int xessUiComposition = -1; // -1 = author default (enabled unless mode NONE), 0 = force off, 1 = force on. INI: XeSSUiComposition
   bool     xessSynthUI = false; // synthesize a premultiplied UI layer (B minus (1-a)C) and tag it so UI modes 3/5 become available. INI: XeSSSynthUI
   int      xessSynthSmooth = 35; // temporal EMA weight percent (new frame's value) applied to the synthetic UI layer: 35 = default, 0 = raw per-frame layer (v4.2 behaviour). Only used with XeSSSynthUI=1. INI: XeSSSynthSmooth
+  bool     xessSynthDebugTint = false; // paint the synthetic UI magenta: in UI mode 3 the wheel turning magenta on generated frames proves the SDK composites our texture. INI: XeSSSynthDebugTint
   float depthSeparation = 10.f;  // sl::Constants minRelativeLinearDepthObjectSeparation; lower = stricter object separation at depth edges (anti-halo). 40 = Streamline default. INI: DepthSeparation
   bool     presentPacing = false; // optional extra GPU wait; off avoids duplicate serialization
   uint32_t fpsCap = 0;           // present-thread frame rate limit, 0 = unlimited
