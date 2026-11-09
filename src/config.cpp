@@ -63,7 +63,11 @@ bool PollHotkeys(){
   bool toggle=Pressed(g_cfg.keyToggleFG,wT),cycle=Pressed(g_cfg.keyCycleFrames,wC);
   if((toggle||cycle)&&!gameFocused)Log("hotkey: %s ignored — foreground window is not the game (vk=0x%x)",cycle?"cycle":"toggle",cycle?g_cfg.keyCycleFrames:g_cfg.keyToggleFG);
   if(gameFocused && toggle){ g_rt.fgUserOff = !g_rt.fgUserOff; Log("hotkey: FG %s by user", g_rt.fgUserOff?"OFF":"ON"); changed=true; }
-  if(gameFocused && cycle && IsDX12Bridge(g_cfg.provider)){auto max=g_rt.maxFrames.load();g_rt.frames=g_rt.frames>=max?1:g_rt.frames+1;Log("hotkey: generated frames -> %u (x%u)",g_rt.frames,g_rt.frames+1);changed=true;}
+  if(gameFocused && cycle && IsDX12Bridge(g_cfg.provider)){auto max=g_rt.maxFrames.load();
+   if(max>1){g_rt.frames=g_rt.frames>=max?1:g_rt.frames+1;Log("hotkey: generated frames -> %u (x%u)",g_rt.frames,g_rt.frames+1);}
+   // v4.7: maxFrames is pinned to 1 (x2) on the XeSS bridge; say so instead of pretending the key cycles.
+   else Log("hotkey: multiplier is pinned to x2 on this SDK path (the field SDK cannot present more)");
+   changed=true;}
   if(changed){char path[MAX_PATH]{},value[16]{};IniPath(path,sizeof(path));snprintf(value,sizeof(value),"%u",g_rt.frames);WritePrivateProfileStringA("fgvk","DLSSGFrames",value,path);WritePrivateProfileStringA("fgvk","UserFGOff",g_rt.fgUserOff?"1":"0",path);}
   UpdateMenuRuntime(g_rt.fgUserOff,g_rt.frames);return changed;
 }
@@ -164,11 +168,12 @@ void LoadConfig(){
   c.nativeHudProtection=GetPrivateProfileIntA("fgvk","NativeHUDProtection",1,path)!=0;
   c.tagUI       = GetPrivateProfileIntA("fgvk","TagUI",c.tagUI?1:0,path)!=0;
   c.capturePresentTransfers=GetPrivateProfileIntA("fgvk","CapturePresentTransfers",c.capturePresentTransfers?1:0,path)!=0;
-  {int m=GetPrivateProfileIntA("fgvk","XeSSUiMode",(int)c.xessUiMode,path);c.xessUiMode=(uint32_t)((m<1||m>5)?1:m);}
-  {int s=GetPrivateProfileIntA("fgvk","XeSSUiComposition",-1,path);c.xessUiComposition=(s==0?0:(s==1?1:-1));}
-  c.xessSynthUI=GetPrivateProfileIntA("fgvk","XeSSSynthUI",c.xessSynthUI?1:0,path)!=0;
-  {int sm=GetPrivateProfileIntA("fgvk","XeSSSynthSmooth",c.xessSynthSmooth,path);c.xessSynthSmooth=(sm<0||sm>100)?35:sm;}
-  c.xessSynthDebugTint=GetPrivateProfileIntA("fgvk","XeSSSynthDebugTint",c.xessSynthDebugTint?1:0,path)!=0;
+  // v4.7: the removed experimental UI knobs are still recognized in the INI only to say so once,
+  // instead of silently ignoring a user's old test configuration.
+  {int dep=0;
+   for(const char* k:{"XeSSUiMode","XeSSUiComposition","XeSSSynthUI","XeSSSynthSmooth","XeSSSynthDebugTint"})
+     if(GetPrivateProfileIntA("fgvk",k,-1,path)>=0)dep=1;
+   if(dep)Log("Deprecated INI keys present (XeSSUiMode/XeSSUiComposition/XeSSSynthUI/XeSSSynthSmooth/XeSSSynthDebugTint): these features were removed after B390 field testing; XeSS UI handling is fixed to mode NONE (whole-frame, no compositing). Safe to delete the lines.");}
   c.antiTearing=ReadStabilityOption("AntiTearing",false);
   c.antiGhostHistory=ReadStabilityOption("AntiGhostHistory",true);
   { char v[32]{};GetPrivateProfileStringA("fgvk","DepthSeparation","",v,sizeof(v),path);if(v[0]){float f=(float)atof(v);if(f>=1.f&&f<=200.f)c.depthSeparation=f;} }

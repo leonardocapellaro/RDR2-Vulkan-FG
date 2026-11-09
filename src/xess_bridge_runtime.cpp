@@ -2,7 +2,6 @@
 #include "config.h"
 #include "experiment_policy.h"
 #include "log.h"
-#include "xess_output_pacing.h"
 #include <cwchar>
 #include <cmath>
 
@@ -68,9 +67,10 @@ bool Runtime::Initialize(ID3D12Device* device,const wchar_t* directory){
   try{mfgUnlock_=std::make_unique<xess_host_unlock::Unlock>(fgModule_,llModule_,3,true);Log("XeSS MFG experimental unlock: validated maximum=3 generated frames (4x); upstream=2b52823e3769c31cf52d3b368c6963cff8fc5344");}
   catch(const xess_host_unlock::RollbackFailure&){mfgUnsafe_=true;return Fail(RuntimeError::FrameContract,"XeSS MFG patch rollback unverified; FG disabled and runtime modules retained",ERROR_INVALID_DATA);}
   catch(const std::exception& e){Log("XeSS MFG unlock not applied: %s; retaining native SDK limits",e.what());}
-  // No SDK context/presentation worker exists yet. A refused compatibility
-  // hook leaves the SDK's normal pacing untouched.
-  xess_pacing::Install(fgModule_);nativeDevice_=device;
+  // v4.7: the optional software output pacer was removed. The 09/11 reject-detail field
+  // forensics proved its identity witness reads DebugFill/foreign bytes (0xCCCC…, 0xE9) at the
+  // pinned presenter offsets — the layout does not match the field SDK, so it can never bind
+  // without reverse-engineering Intel's closed binary, and x2 presents correctly without it.
   if(!LL("xellD3D12CreateContext",p_xellD3D12CreateContext(device,&ll_)))return unwind();
   xell_sleep_params_t sleep{};sleep.bLowLatencyMode=1;
   if(!LL("xellSetSleepMode",p_xellSetSleepMode(ll_,&sleep)) ||
@@ -94,18 +94,14 @@ bool Runtime::CreatePresentation(HWND window,ID3D12CommandQueue* queue,IDXGIFact
   initializedMax_=count;currentInterp_=count; // A later failure requires Shutdown, not a second init.
   if(!FG("xefgSwapChainD3D12GetSwapChainPtr",p_xefgSwapChainD3D12GetSwapChainPtr(
       fg_,__uuidof(IDXGISwapChain3),(void**)&swapchain_)))return false;
-  const int forcedComposition=Cfg().xessUiComposition; // -1 = auto (enabled unless mode NONE); INI XeSSUiComposition forces 0/1
-  const auto composition=forcedComposition>=0?(forcedComposition?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED)
-      :(uiMode==XEFG_SWAPCHAIN_UI_MODE_NONE?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED);
-  if(!FG("xefgSwapChainSetUiCompositionState",p_xefgSwapChainSetUiCompositionState(fg_,composition)))return false;
-  xess_pacing::Bind(fg_,nativeDevice_);
+  // v4.7: UI mode is fixed to NONE (whole-frame interpolation), so composition is always disabled.
+  if(!FG("xefgSwapChainSetUiCompositionState",p_xefgSwapChainSetUiCompositionState(fg_,XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED)))return false;
   return SetEnabled(false); // Enable only after a complete first-frame contract.
 }
 bool Runtime::SetEnabled(bool enabled){
   if(!swapchain_)return Fail(RuntimeError::InvalidCall,"SetEnabled before presentation initialization",0);
   if(enabledKnown_ && enabled_==enabled){status_={RuntimeError::None,"XeSS enabled state unchanged",0};return true;}
   if(!FG("xefgSwapChainSetEnabled",p_xefgSwapChainSetEnabled(fg_,enabled?1u:0u)))return false;
-  xess_pacing::Reset(fg_);
   enabled_=enabled;enabledKnown_=true;return true;
 }
 bool Runtime::AttachPresentation(IDXGISwapChain3* existing,ID3D12CommandQueue* queue,uint32_t flags,
@@ -117,22 +113,18 @@ bool Runtime::AttachPresentation(IDXGISwapChain3* existing,ID3D12CommandQueue* q
   if(!FG("xefgSwapChainD3D12InitFromSwapChain",p_xefgSwapChainD3D12InitFromSwapChain(fg_,queue,&params)))return false;
   initializedMax_=count;currentInterp_=count;
   if(!FG("xefgSwapChainD3D12GetSwapChainPtr",p_xefgSwapChainD3D12GetSwapChainPtr(fg_,__uuidof(IDXGISwapChain3),(void**)&swapchain_)))return false;
-  const int forcedComposition=Cfg().xessUiComposition; // -1 = auto (enabled unless mode NONE); INI XeSSUiComposition forces 0/1
-  const auto composition=forcedComposition>=0?(forcedComposition?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED)
-      :(uiMode==XEFG_SWAPCHAIN_UI_MODE_NONE?XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED:XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_ENABLED);
-  if(!FG("xefgSwapChainSetUiCompositionState",p_xefgSwapChainSetUiCompositionState(fg_,composition)))return false;
-  xess_pacing::Bind(fg_,nativeDevice_);return SetEnabled(false);
+  // v4.7: UI mode fixed to NONE — composition always disabled (see CreatePresentation).
+  if(!FG("xefgSwapChainSetUiCompositionState",p_xefgSwapChainSetUiCompositionState(fg_,XEFG_SWAPCHAIN_UI_COMPOSITION_STATE_DISABLED)))return false;
+  return SetEnabled(false);
 }
 bool Runtime::SetInterpolations(uint32_t count){
   if(!swapchain_ || !count || count>initializedMax_)
     return Fail(RuntimeError::InvalidCall,"Unsupported XeSS interpolation count",count);
-  // Edge-only: the provider re-applies the INI/menu value every present. Calling the SDK every
-  // frame would reset the cadence estimator 36x/s and, per Intel's note, may recompile shaders;
-  // an unchanged count is now a true no-op.
+  // Edge-only: calling the SDK every frame would reset the cadence estimator 36x/s and, per
+  // Intel's note, may recompile shaders; an unchanged count is a true no-op.
   if(count==currentInterp_)return true;
   if(!FG("xefgSwapChainSetNumInterpolatedFrames",p_xefgSwapChainSetNumInterpolatedFrames(fg_,count)))return false;
-  currentInterp_=count;
-  xess_pacing::Reset(fg_);return true;
+  currentInterp_=count;return true;
 }
 bool Runtime::Sleep(uint32_t id,uint32_t fpsCap,uint32_t outputCap,uint32_t outputs){
   if(!ll_ || !id)return Fail(RuntimeError::InvalidCall,"Invalid XeLL sleep frame",id);
@@ -178,7 +170,6 @@ bool Runtime::TagFrame(uint32_t id,const xefg_swapchain_frame_constant_data_t& c
      !std::isfinite(constants.frameRenderTime) || constants.frameRenderTime<0)
     return Fail(RuntimeError::FrameContract,"Invalid XeSS frame constants",id);
   if(!FG("xefgSwapChainTagFrameConstants",p_xefgSwapChainTagFrameConstants(fg_,id,&constants)))return false;
-  if(constants.resetHistory)xess_pacing::Reset(fg_);
   for(uint32_t i=0;i<count;++i)
     if(!FG("xefgSwapChainD3D12TagFrameResource",p_xefgSwapChainD3D12TagFrameResource(fg_,resourceCopyList,id,&resources[i])))return false;
   lastTagged_=id;tagged_=true;return true;
@@ -208,12 +199,11 @@ bool Runtime::RestoreAfterFailedDestroy(){
   const auto result=p_xefgSwapChainD3D12GetSwapChainPtr(fg_,__uuidof(IDXGISwapChain3),reinterpret_cast<void**>(&swapchain_));
   if(result<0 || !swapchain_)return Fail(RuntimeError::XeFG,"Restore native presentation after refused XeSS destroy",result);
   tagged_=false;lastTagged_=0;enabled_=false;enabledKnown_=false;
-  // Shutdown unbound output pacing. Keep generation disabled with a visible
-  // error until a subsequent successful restart; no stale timing is resumed.
+  // Keep generation disabled with a visible error until a subsequent successful
+  // restart; no stale state is resumed.
   status_=refused;return true;
 }
 bool Runtime::Shutdown(){
-  if(fg_)xess_pacing::Unbind(fg_);
   if(mfgUnsafe_)return Fail(RuntimeError::FrameContract,"XeSS MFG patch rollback unverified; runtime modules retained",ERROR_INVALID_DATA);
   if(swapchain_){swapchain_->Release();swapchain_=nullptr;}
   if(fg_){
@@ -230,7 +220,6 @@ bool Runtime::Shutdown(){
   if(fgModule_)FreeLibrary(fgModule_);if(llModule_)FreeLibrary(llModule_);
   fgModule_=llModule_=nullptr;properties_={};initializedMax_=lastTagged_=currentInterp_=0;tagged_=enabled_=enabledKnown_=false;
   minimumIntervalUs_=0;
-  nativeDevice_=nullptr;
   return true;
 }
 }

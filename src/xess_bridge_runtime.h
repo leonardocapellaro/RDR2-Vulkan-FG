@@ -57,7 +57,6 @@ private:
   bool LL(const char*,xell_result_t);
   bool Load(HMODULE&,const wchar_t*,const wchar_t*);
   HMODULE fgModule_{},llModule_{};
-  ID3D12Device* nativeDevice_{}; // Borrowed for strict software-pacer identity checks.
   std::unique_ptr<xess_host_unlock::Unlock> mfgUnlock_;
   bool mfgUnsafe_{}; // Keep SDK modules mapped if patch rollback is unverified.
   xefg_swapchain_handle_t fg_{};
@@ -68,7 +67,7 @@ private:
   xell_version_t llVersion_{};
   RuntimeStatus status_{};
   uint32_t initializedMax_{},lastTagged_{};
-  uint32_t currentInterp_{}; // Cached applied count; the provider re-applies every present and the SDK call must be edge-only (Intel perf note: re-set may recompile shaders/reallocate).
+  uint32_t currentInterp_{}; // Cached applied count; the SDK call must be edge-only (Intel perf note: re-set may recompile shaders/reallocate).
   uint32_t minimumIntervalUs_{};
   bool tagged_{};
   bool enabled_{};

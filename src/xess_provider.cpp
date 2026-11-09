@@ -27,7 +27,6 @@
 #include "log.h"
 #include "runtime_errors.h"
 #include "hud_capture.h"
-#include "ui_synth.h"
 #include <vulkan/vulkan_win32.h>
 #include <dxgi1_5.h>
 #include <mutex>
@@ -67,17 +66,14 @@ ID3D12CommandQueue* dxQueue{};ID3D12CommandQueue* nativeDxQueue{};ID3D12Fence* d
 std::unordered_map<VkSurfaceKHR,HWND> windows;
 PFN_vkCreateWin32SurfaceKHR createSurface{};
 struct Frame {
- VkImage image{};VkDeviceMemory memory{};SharedImage transport{};SharedImage ui{};
+ VkImage image{};VkDeviceMemory memory{};SharedImage transport{};
  VkCommandBuffer command{};VkFence fence{};SharedFence uploaded{};
  ID3D12CommandAllocator* allocator{};ID3D12GraphicsCommandList* list{};
- uint64_t retired{},epoch{};bool acquired{},transportUsed{},uiUsed{},submitMarked{};
+ uint64_t retired{},epoch{};bool acquired{},transportUsed{},submitMarked{};
 };
 struct Chain {
  VkSwapchainKHR handle{};VkSurfaceKHR surface{};HWND window{};VkExtent2D extent{};VkFormat format{};DXGI_FORMAT dxFormat{};
  IDXGISwapChain3* dx{};VkCommandPool pool{};std::vector<Frame> frames;uint32_t next{};bool allowTearing{};
- // Synthetic premultiplied UI layer (XeSSSynthUI): uiMode is the effective creation mode and
- // uiSynth gates per-frame UI tagging for modes 3/5, which require a tagged UI resource.
- bool uiSynth{};uint32_t uiMode{4};
 };
 std::unique_ptr<Chain> chain;
 std::unordered_set<VkSwapchainKHR> retiredChains;
@@ -186,7 +182,6 @@ VKAPI_ATTR VkResult VKAPI_CALL CopyableImage(VkDevice d,const VkImageCreateInfo*
 bool MakeFrame(Chain& c,Frame& f,VkImageUsageFlags usage){
  if(!NativeImage(c.extent,c.format,usage|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,f.image,f.memory) ||
     !bridge.CreateImage(c.extent.width,c.extent.height,c.dxFormat,c.format,f.transport) ||
-    (c.uiSynth&&!bridge.CreateImage(c.extent.width,c.extent.height,c.dxFormat,c.format,f.ui)) ||
     !bridge.CreateFence(f.uploaded))return false;
  VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};ai.commandPool=c.pool;ai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;ai.commandBufferCount=1;
  VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fi.flags=VK_FENCE_CREATE_SIGNALED_BIT;
@@ -209,7 +204,7 @@ void DestroyInputs(){
  for(auto& in:inputs)DestroyInput(in);
 }
 void DestroyFrameCopies(Chain& c){
- for(auto& f:c.frames){if(f.list)f.list->Release();if(f.allocator)f.allocator->Release();bridge.DestroyImage(f.transport);bridge.DestroyImage(f.ui);f.uiUsed=false;bridge.DestroyFence(f.uploaded);
+ for(auto& f:c.frames){if(f.list)f.list->Release();if(f.allocator)f.allocator->Release();bridge.DestroyImage(f.transport);bridge.DestroyFence(f.uploaded);
   if(f.fence)Fn<PFN_vkDestroyFence>("vkDestroyFence")(device,f.fence,nullptr);
   f.list=nullptr;f.allocator=nullptr;f.fence=VK_NULL_HANDLE;f.command=VK_NULL_HANDLE;
  }
@@ -247,7 +242,6 @@ bool DestroyChain(bool retainGameResources=false){
   group.chain=std::move(chain);
   Log("Bridge old resources retained until game destroys swapchain=%p; generations=%zu",(void*)handle,retiredResources.size());
  }else{HudCaptureDestroy();DestroyFrameResources(c);}
- SynthUiDestroy();
  DestroyInputs();
  attached=false;sdkAvailable=false;sdkFailed=false;chain.reset();return true;
 }
@@ -537,38 +531,27 @@ VkResult XessCreateSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const
  DisplayTarget target;target.Resolve(c.window,bridge.Native(),factory);
  // RDR2's tracked SR inputs use inverted depth. Every captured input verifies it;
  // mismatches are reported and presented without interpolation, never guessed.
- // Intel's XeSS-FG guide: UI modes 2/3/5 require a separately tagged UI color+alpha
- // texture, which RDR2 under Vulkan never exposes (the HUD is composited into the
- // backbuffer). Selecting one without that resource makes the SDK refuse with
- // MISMATCH_INPUT_RESOURCES and generate no frames; clamp to mode 4 and say so.
- // Synthetic UI (XeSSSynthUI): premultiplied layer computed from the presented frame minus the
- // HUD-less capture, tagged as RES_UI so Intel UI modes 3/5 become satisfiable. 8-bit UNORM only.
- // Allocate the synthetic UI pipeline only when it is actually requested: the staging ring is
- // ~20MB per slot, and building it on the default XeSSSynthUI=0 path would burn VRAM and init time.
- if(Cfg().xessSynthUI)SynthUiInit(device,physical,XessMenuGDPA,c.format,c.extent);
- const bool synthReady=Cfg().xessSynthUI && SynthUiAvailable();
- uint32_t uiModeCfg=Cfg().xessUiMode;
- if(uiModeCfg==2){Log("XeSSUiMode=2 needs a game-provided UI texture; clamping to 4 (BACKBUFFER_HUDLESS)");uiModeCfg=4;}
- if((uiModeCfg==3||uiModeCfg==5)&&!synthReady){
-  Log("XeSSUiMode=%u needs a UI texture; %s - clamping to 4 (BACKBUFFER_HUDLESS). Set XeSSSynthUI=1 to synthesize one.",
-      uiModeCfg,Cfg().xessSynthUI?"the synthetic UI pipeline is unavailable":"XeSSSynthUI=0");
-  uiModeCfg=4;
- }
- c.uiMode=uiModeCfg;
- if(synthReady&&(uiModeCfg==3||uiModeCfg==5))Log("XeSS synthetic UI armed: tagging premultiplied UI layer for UI mode %u",uiModeCfg);
+ // v4.7: UI handling is fixed to XEFG_SWAPCHAIN_UI_MODE_NONE (whole-frame interpolation,
+ // composition disabled). UI modes 2-5 and the synthetic premultiplied UI layer (ui_synth + the
+ // B minus (1-a)C estimator shader) were REMOVED after four B390 field iterations (07-11..09-11):
+ // the tint test proved the SDK composites our layer and the FG-off ablation proved the mode-3
+ // flicker IS real UI (real frames) alternating with estimated UI (generated frames) — no alpha
+ // estimator, including the offline-validated v4.6 unmix, made the blink go away in the field.
+ // mode 1 was and remains the only flicker-free configuration; mode 2 needs a game-provided UI
+ // texture RDR2/Vulkan never exposes, and 4/5 re-extract from the backbuffer (Intel documents the
+ // translucent-UI weakness). Removed code lives in git history if a future SDK makes it salvageable.
  uint32_t interpCap=1;
  if(sdkAvailable){
-  const auto uiMode=(xefg_swapchain_ui_mode_t)uiModeCfg; // default 4 = BACKBUFFER_HUDLESS (author's choice)
-  // v4.4: the swapchain used to be created with maxInterpolatedFrames=1 — a hard x2 ceiling that
-  // silently defeated both the INI multiplier and the menu (SetInterpolations could never exceed
-  // the creation cap; 08/11 23:48/23:51 sessions prove: DLSSGFrames=2 in INI, displayed stuck=2).
-  // The SDK documents heap sizes as valid for any count up to the creation max, so we create with
-  // the SDK maximum and the per-present SetInterpolations(multiplier) call picks the real count.
-  interpCap=(std::max)(1u,sdk.MaxInterpolations());
+  const auto uiMode=XEFG_SWAPCHAIN_UI_MODE_NONE; // v4.7 fixed; see the removal note above
+  // v4.7: created at 1 interpolated frame (x2). v4.4 had raised the creation ceiling to the SDK
+  // maximum for >x2; the 09/11 field run proved that changes nothing (interp=2 yet displayed=2
+  // every enabled second, and the SDK scheduler never batched more outputs), so x2 is the honest
+  // pin and the smaller heap is the smaller risk. sdk.MaxInterpolations() stays in the log line:
+  // it is the SDK's advertised capability, useful to see when a future driver changes behavior.
+  interpCap=1;
   attached=sdk.CreatePresentation(c.window,dxQueue,factory,desc,XEFG_SWAPCHAIN_INIT_FLAG_INVERTED_DEPTH,interpCap,uiMode,&target.fullscreen,target.output);
   if(attached){sdkFailed=false;c.dx=sdk.Swapchain();c.dx->AddRef();dxQueue=sdk.Queue(nativeDxQueue);RuntimeErrors::ClearError(RuntimeErrors::Code::ProviderInit);RuntimeErrors::ClearError(RuntimeErrors::Code::HardwareScheduling);}else{SdkError();sdk.Shutdown();sdkAvailable=false;}
  }
- c.uiSynth=attached&&synthReady&&(c.uiMode==3||c.uiMode==5);
  if(!c.dx){
   HRESULT result=factory->CreateSwapChainForHwnd(dxQueue,c.window,&desc,&target.fullscreen,target.output,&dx);
   if(SUCCEEDED(result)){result=dx->QueryInterface(__uuidof(IDXGISwapChain3),(void**)&c.dx);dx->Release();}
@@ -591,7 +574,7 @@ VkResult XessCreateSwapchain(VkDevice d,const VkSwapchainCreateInfoKHR* ci,const
  std::vector<VkImage> images;for(auto& f:c.frames)images.push_back(f.image);
  HudCaptureInit(device,physical,XessMenuGDPA,c.format,c.extent,images);
  MenuCaptureImages(device,c.handle,(uint32_t)images.size(),images.data());
- Log("XeSS experimental virtual swapchain: %ux%u images=%zu SDK=%d maxInterpolations=%u createdInterp=%u allowTearing=%d syncInterval=%u uiMode=%u uiComposition=%d",c.extent.width,c.extent.height,c.frames.size(),(int)attached,sdkAvailable?sdk.MaxInterpolations():0,interpCap,(int)c.allowTearing,Cfg().antiTearing?1u:0u,(unsigned)uiModeCfg,(int)Cfg().xessUiComposition);
+ Log("XeSS experimental virtual swapchain: %ux%u images=%zu SDK=%d maxInterpolations=%u createdInterp=%u allowTearing=%d syncInterval=%u uiMode=NONE (fixed, no composition)",c.extent.width,c.extent.height,c.frames.size(),(int)attached,sdkAvailable?sdk.MaxInterpolations():0,interpCap,(int)c.allowTearing,Cfg().antiTearing?1u:0u);
  return VK_SUCCESS;
 }
 bool XessPrepare(VkCommandBuffer cmd,VkImage depthImage,VkImage motionImage,uint32_t dw,uint32_t dh,uint32_t mw,uint32_t mh,
@@ -639,7 +622,7 @@ bool XessPrepare(VkCommandBuffer cmd,VkImage depthImage,VkImage motionImage,uint
  // by the tagged extent; preserve the captured NGX pixel displacement exactly.
  in.slConstants=constants;
  const bool dimensionsChanged=inputDimensions.Changed(dw,dh);
- if(dimensionsChanged){in.constants.resetHistory=1;in.slConstants.reset=sl::Boolean::eTrue;if(Cfg().xessSynthUI)SynthUiReset();Log("Bridge input size changed: %ux%u; resetting provider history",dw,dh);}
+ if(dimensionsChanged){in.constants.resetHistory=1;in.slConstants.reset=sl::Boolean::eTrue;Log("Bridge input size changed: %ux%u; resetting provider history",dw,dh);}
  in.slConstants.jitterOffset={jx,jy};
  auto scale=MvecScaleForStreamline(sx,sy,mw,mh,true);in.slConstants.mvecScale={scale.x,scale.y};
  in.slConstants.depthInverted=sl::Boolean::eTrue;in.slConstants.cameraMotionIncluded=sl::Boolean::eTrue;
@@ -711,11 +694,15 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
  bool haveHud=HudCaptureResource().resource!=nullptr && HudCaptureFrameIndex()==f.epoch;
  bool off=Rt().fgUserOff.load();uint32_t multiplier=Rt().frames;bool requestOff{};
  if(ConsumeMenuRequest(requestOff,multiplier)){off=requestOff;Rt().fgUserOff=off;}
- multiplier=(std::max)(1u,(std::min)(multiplier,(std::max)(1u,sdk.MaxInterpolations())));Rt().frames=multiplier;
- Rt().maxFrames=(std::max)(1u,sdk.MaxInterpolations());
- if(attached && !sdkFailed && !sdk.SetInterpolations(multiplier))SdkError(false);
- static uint32_t loggedMultiplier=0;
- if(attached && !sdkFailed && multiplier!=loggedMultiplier){loggedMultiplier=multiplier;Log("XeSS interpolation target set: x%u (swapchain cap x%u, INI/menu path applied)",multiplier+1,(std::max)(1u,sdk.MaxInterpolations())+1);}
+ // v4.7: multiplier pinned to x2 (1 interpolated frame). Our side applied x3/x4 correctly in every
+ // field session since v4.4 (creation, menu, INI, SetInterpolations all OK) yet the SDK presented 2
+ // every single enabled second, and the unbound-batch breadcrumb never fired — the clamp is inside
+ // Intel's closed scheduler path when the software pacer is unbound, and the 09/11 reject detail
+ // proved the pacer's witness cannot bind on this SDK without reverse-engineering the vendor DLL.
+ multiplier=1;Rt().frames=multiplier;Rt().maxFrames=1;
+ static uint32_t loggedMultiplier=0;static bool pinWarned=false;
+ if(!pinWarned && Cfg().dlssgFrames>1){pinWarned=true;Log("XeSS multiplier pinned to x2: DLSSGFrames=%u requested, but the field SDK cannot present more than 2 (09/11 diagnostics; see release notes)",Cfg().dlssgFrames);}
+ if(attached && !sdkFailed && multiplier!=loggedMultiplier){loggedMultiplier=multiplier;Log("XeSS interpolation target set: x%u (pinned x2 on this SDK path)",multiplier+1);}
  UpdateMenuRuntime(off,multiplier);
  bool generate=attached && !sdkFailed && in && in->valid && haveHud && !off && HasRecentDLSSInput();
  if(in && in->epoch==0 && drain.size()!=1)generate=false;
@@ -746,15 +733,7 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
  if(!Vk(Fn<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(f.command,&begin),"XeSS upload command begin"))return VK_ERROR_DEVICE_LOST;
  auto barrier=Fn<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");auto copy=Fn<PFN_vkCmdCopyImage>("vkCmdCopyImage");
  if(generate){auto hud=HudCaptureResource();SnapshotInput color{(VkImage)hud.resource,c.format,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_IMAGE_USAGE_TRANSFER_SRC_BIT,c.extent,{0,0}};
-  if(!in->snapshot->RecordColor(f.command,color,family,!in->colorUsed))generate=false;
-  // Best-effort: once created in a UI mode the SDK demands a tagged UI resource every frame, so a
-  // failed record still tags the retained (stale, self-healing) layer rather than erroring the contract.
-  if(generate&&c.uiSynth){
-   static bool synthWarned=false;
-   const bool recorded=hud.resource&&SynthUiRecord(f.command,f.image,(VkImage)hud.resource,f.ui.vk,family,!f.uiUsed);
-   if(recorded)f.uiUsed=true;
-   else if(!synthWarned){synthWarned=true;Log("Synthetic UI record failed; tagging retained layer for this frame");}
-  }}
+  if(!in->snapshot->RecordColor(f.command,color,family,!in->colorUsed))generate=false;}
  VkImageMemoryBarrier bs[2]{};for(auto& b:bs){b.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};}
  bs[0].image=f.image;bs[0].oldLayout=VK_IMAGE_LAYOUT_GENERAL;bs[0].newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
  bs[0].srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;bs[0].dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
@@ -799,13 +778,12 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
    for(unsigned col=0;col<3;++col){float dot=0;for(unsigned row=0;row<3;++row){in->constants.viewMatrix[row*4+col]=(&axes[col].x)[row];dot+=(&c.cameraPos.x)[row]*(&axes[col].x)[row];}in->constants.viewMatrix[12+col]=-dot;}
   }
   in->constants.resetHistory=in->slConstants.reset==sl::Boolean::eTrue;
-  if(resumeHistory.NeedsReset(f.epoch) || presentedDimensions.Changed(in->dw,in->dh)){in->constants.resetHistory=1;in->slConstants.reset=sl::Boolean::eTrue;if(Cfg().xessSynthUI)SynthUiReset();}
-  SharedImage* resources[]={&in->snapshot->hudless,&in->snapshot->depth,&in->snapshot->motion,&f.ui};
-  const uint32_t tagCount=c.uiSynth?4u:3u;
-  xefg_swapchain_d3d12_resource_data_t tags[4]{};
-  for(uint32_t i=0;i<tagCount;++i){transition(resources[i]->dx,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);tags[i].pResource=resources[i]->dx;tags[i].validity=XEFG_SWAPCHAIN_RV_ONLY_NOW;tags[i].incomingState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;tags[i].resourceSize=(i==0||i==3)?xefg_swapchain_2d_t{c.extent.width,c.extent.height}:xefg_swapchain_2d_t{in->dw,in->dh};}
+  if(resumeHistory.NeedsReset(f.epoch) || presentedDimensions.Changed(in->dw,in->dh)){in->constants.resetHistory=1;in->slConstants.reset=sl::Boolean::eTrue;}
+  SharedImage* resources[]={&in->snapshot->hudless,&in->snapshot->depth,&in->snapshot->motion};
+  constexpr uint32_t tagCount=3u; // v4.7: RES_UI tagging removed with the synthetic UI layer
+  xefg_swapchain_d3d12_resource_data_t tags[tagCount]{};
+  for(uint32_t i=0;i<tagCount;++i){transition(resources[i]->dx,D3D12_RESOURCE_STATE_COMMON,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);tags[i].pResource=resources[i]->dx;tags[i].validity=XEFG_SWAPCHAIN_RV_ONLY_NOW;tags[i].incomingState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;tags[i].resourceSize=i==0?xefg_swapchain_2d_t{c.extent.width,c.extent.height}:xefg_swapchain_2d_t{in->dw,in->dh};}
   tags[0].type=XEFG_SWAPCHAIN_RES_HUDLESS_COLOR;tags[1].type=XEFG_SWAPCHAIN_RES_DEPTH;tags[2].type=XEFG_SWAPCHAIN_RES_MOTION_VECTOR;
-  if(c.uiSynth)tags[3].type=XEFG_SWAPCHAIN_RES_UI;
   double tagStart=ClockMs();if(!sdk.TagFrame(id,in->constants,tags,tagCount,f.list,in->slConstants)){SdkError(false);generate=false;}timings.tagCPU.Add(ClockMs()-tagStart);
   for(uint32_t i=0;i<tagCount;++i)transition(resources[i]->dx,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
  }
@@ -834,11 +812,12 @@ VkResult XessPresent(VkQueue q,const VkPresentInfoKHR* pi){
  xefg_swapchain_present_status_t actual{};bool measured=attached && sdk.LastPresent(actual) && presentationStatus.native==0;
  if(attached && sdk.IsDLSS() && presentationStatus.native)Error(RuntimeErrors::Code::ProviderState,presentationStatus.operation?presentationStatus.operation:"DLSSG DX12 state query failed",presentationStatus.native);
  SetFPSGenerationActive(measured && actual.isFrameGenEnabled);
- if(measured){RecordDisplayedFrames(actual.framesPresented);UpdateMenuStats(sdk.MaxInterpolations(),(uint32_t)actual.frameGenResult,(float)actual.framesPresented);}
+ // v4.7: the menu multiplier reflects the x2 pin (menu reads maximum; 1 shows only x2).
+ if(measured){RecordDisplayedFrames(actual.framesPresented);UpdateMenuStats(1,(uint32_t)actual.frameGenResult,(float)actual.framesPresented);}
  else{RecordDisplayedFrames(1);UpdateMenuStats(1,0,1);}
- // interp= is the interpolation count we asked the SDK for this frame (x=interp+1); requested=
- // stays as the boolean eligibility flag for continuity. 09/11 field: x3 was applied (menu/INI)
- // yet displayed stuck at 2 — compare interp= against displayed= to separate our side from the SDK's.
+ // interp= is the interpolation count applied this frame (x=interp+1); pinned to 1 (x2) in v4.7.
+ // requested= stays as the boolean eligibility flag for continuity. displayed= is the SDK's own
+ // framesPresented — the ground truth that proved the >x2 clamp lives inside the SDK (09/11).
  if(serial==1 || serial%120==0)LogDebug("XeSS telemetry: frame=%llu epoch=%llu input=%llu hud=%llu requested=%d interp=%u enabled=%u displayed=%u result=%d query=%lld reset=%u resetStreak=%u",(unsigned long long)serial,(unsigned long long)f.epoch,(unsigned long long)(in?in->order:0),(unsigned long long)HudCaptureFrameIndex(),(int)generate,multiplier,actual.isFrameGenEnabled,actual.framesPresented,(int)actual.frameGenResult,(long long)sdk.StateQueryResult(),in?in->constants.resetHistory:0,resetStreak);
  if(serial%120==0){auto timingLog=timingReportsLeft?&Log:&LogDebug;if(timingReportsLeft)--timingReportsLeft;timingLog("Bridge CPU timing avg/max ms: acquireRetire=%.3f/%.3f XeLLSleep=%.3f/%.3f uploadRetire=%.3f/%.3f tags=%.3f/%.3f proxyPresent=%.3f/%.3f interval=%u presentFlags=0x%x; SDK output counts are queued frames, not scanout timestamps",timings.acquireRetire.Mean(),timings.acquireRetire.maximum,timings.sleep.Mean(),timings.sleep.maximum,timings.uploadRetire.Mean(),timings.uploadRetire.maximum,timings.tagCPU.Mean(),timings.tagCPU.maximum,timings.presentCPU.Mean(),timings.presentCPU.maximum,interval,presentFlags);timings={};}
  static ULONGLONG nativeSince=0;auto now=GetTickCount64();

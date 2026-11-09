@@ -32,7 +32,10 @@ public:
       const DXGI_SWAP_CHAIN_DESC1& desc,uint32_t flags,uint32_t,xefg_swapchain_ui_mode_t ui,
       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen=nullptr,IDXGIOutput* output=nullptr){
     if(IsDLSS())return dlss_.CreatePresentation(h,q,f,desc,5,fullscreen,output);
-    return xess_.CreatePresentation(h,q,f,desc,flags,MaxInterpolations(),ui,fullscreen) && xess_.SetInterpolations(1);
+    // v4.7: created at 1 interpolated frame (x2). v4.4/v4.5 created at the SDK max (x4) to give
+    // >x2 a chance; 09/11 field proved the SDK never presents more than 2 on this path, so the
+    // bigger heap buys nothing but risk.
+    return xess_.CreatePresentation(h,q,f,desc,flags,1,ui,fullscreen);
   }
   ID3D12CommandQueue* Queue(ID3D12CommandQueue* original)const{return IsDLSS()?dlss_.Queue():original;}
   IDXGISwapChain3* Swapchain()const{return IsDLSS()?dlss_.Swapchain():xess_.Swapchain();}

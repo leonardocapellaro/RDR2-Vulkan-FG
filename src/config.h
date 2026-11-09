@@ -37,11 +37,13 @@ struct Config {
   bool antiTearing = false;
   bool antiGhostHistory = true;
   bool capturePresentTransfers = false; // opt-in: full-extent copy/blit into virtual swapchain images counts as the HUD-less snapshot (third-party Vulkan SR delivery, e.g. OptiScaler). INI: CapturePresentTransfers
-  uint32_t xessUiMode = 1;  // Fork default 1 (author default 4): mode 1=NONE (whole-backbuffer interpolation, composition auto-off) was the only configuration observed flicker-free on the B390 wheel menu; Intel documents the mode-4 backbuffer-extraction weakness for translucent UI. 2=BACKBUFFER_UITEXTURE 3=HUDLESS_UITEXTURE 4=BACKBUFFER_HUDLESS (UI extracted from backbuffer) 5=BACKBUFFER_HUDLESS_UITEXTURE. Modes 2/3/5 need a tagged UI texture RDR2/Vulkan does not expose: mode 2 always clamps to 4 with a log, modes 3/5 also clamp unless XeSSSynthUI=1 synthesizes the layer. INI: XeSSUiMode
-  int xessUiComposition = -1; // -1 = author default (enabled unless mode NONE), 0 = force off, 1 = force on. INI: XeSSUiComposition
-  bool     xessSynthUI = false; // synthesize a premultiplied UI layer (B minus (1-a)C) and tag it so UI modes 3/5 become available. INI: XeSSSynthUI
-  int      xessSynthSmooth = 35; // temporal EMA weight percent (new frame's value) applied to the synthetic UI layer: 35 = default, 0 = raw per-frame layer (v4.2 behaviour). Only used with XeSSSynthUI=1. INI: XeSSSynthSmooth
-  bool     xessSynthDebugTint = false; // paint the synthetic UI magenta: in UI mode 3 the wheel turning magenta on generated frames proves the SDK composites our texture. INI: XeSSSynthDebugTint
+  // v4.7 cleanup: XeSS UI modes 2-5 and the synthetic UI layer (XeSSSynthUI/XeSSSynthSmooth/
+  // XeSSSynthDebugTint/XeSSUiComposition knobs) were REMOVED. Four B390 field iterations
+  // (07-11..09-11) proved mode 1 (NONE, whole-frame interpolation, composition off) is the only
+  // flicker-free UI handling: the SDK composites any reconstructed UI layer, but the estimate can
+  // never match the game's real UI, so composited modes blink real-vs-synthetic every frame
+  // (FG-off ablation confirmed the mechanism). UI mode is fixed to NONE; INI keys are ignored
+  // with a one-time log if still present.
   float depthSeparation = 10.f;  // sl::Constants minRelativeLinearDepthObjectSeparation; lower = stricter object separation at depth edges (anti-halo). 40 = Streamline default. INI: DepthSeparation
   bool     presentPacing = false; // optional extra GPU wait; off avoids duplicate serialization
   uint32_t fpsCap = 0;           // present-thread frame rate limit, 0 = unlimited
